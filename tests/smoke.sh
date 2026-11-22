@@ -8,6 +8,9 @@
 #   - The first checks run on the configured container and data directory: .env must set none of VNC_SIZE,
 #     NODANTED, SOCKS_USER and SOCKS_PASSWD, and the saved preferences must keep LocalLanAccess true.
 #   - The cases that change the data directory use tmp/smoke-data in the repository.
+#   - On the openconnect image, the configured container starts openconnect for the configured VPN_SERVER, which
+#     connects to that gateway without logging in: at the first checks, at its two restarts and at the final
+#     recreate.
 #
 # Waits until the container is ready and runs every check. Stops danted twice, the second time while a tunnel
 # interface of another address exists, and checks the SOCKS5 proxy after run_service restarts it. Puts a rule
@@ -37,8 +40,9 @@
 # /etc/vpn-type: the tunnel interface is the client's, and the image must hold only that client's software, and
 # diag.sh must print that client's version. The checks of the Cisco client's processes, login record, preferences
 # and client profile, of the unmounted resolv.conf and hosts, and of the VPN_SERVER cases above run only on the
-# Cisco image. On the openconnect image, every recreate leaves VPN_SERVER empty unless it sets it, so that
-# openconnect does not connect to the configured gateway; the checks of the empty data directory also check that
+# Cisco image. On the openconnect image, every recreate but the final one leaves VPN_SERVER empty unless it sets
+# it, so that openconnect connects to the configured gateway only in the configured container; the checks of the
+# empty data directory also check that
 # the login terminal waits for VPN_SERVER, which is logged once, and that the callback port is not forwarded. Then
 # it recreates the container with VPN_SERVER=127.0.0.1 and CLI_OPTS set: it checks that the host reaches a test
 # listener on [::1]:29786 in the container through 127.0.0.1:29786 and cannot reach VNC on 5901, then starts a test
@@ -290,7 +294,7 @@ EOF
 # Recreate the container with the repository's compose file and .env, from any working directory.
 # The arguments are environment assignments for docker compose, such as CISCO_VPN_DATA=<directory>;
 # an empty assignment such as PASSWORD= replaces a value set in .env. On the openconnect image, VPN_SERVER is empty
-# unless an argument sets it, so that openconnect does not connect to the configured gateway.
+# unless an argument sets it, so that openconnect connects to the configured gateway only in the configured container.
 recreate() {
     local defaults=()
     [ "$vpn_type" = openconnect ] && defaults=(VPN_SERVER=)
