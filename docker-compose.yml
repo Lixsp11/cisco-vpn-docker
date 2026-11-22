@@ -16,6 +16,10 @@ services:
       - "127.0.0.1:6080:6080"   # noVNC
       - "127.0.0.1:1080:1080"   # SOCKS5
       - "127.0.0.1:8888:8888"   # HTTP
+    volumes:
+      # Home directory of the GUI user: Cisco preferences (gateway address, local LAN access)
+      # and the login page's cookies
+      - ${CISCO_VPN_DATA:-${HOME}/.cisco-vpn-data}:/home/vpnuser
     mem_limit: 600m
     memswap_limit: 1200m
     networks:

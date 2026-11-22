@@ -2,8 +2,8 @@
 # Container entrypoint: starts VNC, noVNC, the VPN client, the SOCKS5 and HTTP proxies,
 # and keeps them running. Each service's output is prefixed with [service] in docker logs.
 
-# Unprivileged user that runs the VPN client's GUI, created in the Dockerfile
-# shellcheck disable=SC2034  # used by the sourced vpn-cisco.sh
+# Unprivileged user that runs the VPN client's GUI, created in the Dockerfile.
+# Its home directory is the volume that keeps the client's settings.
 VPN_USER=vpnuser
 
 # VPN client steps: defines vpn_prepare and vpn_start
@@ -41,9 +41,16 @@ stop_all() {
 }
 trap stop_all TERM INT
 
+# Docker creates the volume's host directory as root when it does not exist, so give the directory itself
+# to the GUI user, which saves its settings there. Not recursive: files that root keeps there stay root's.
+prepare_home() {
+    chown "$VPN_USER:" "/home/$VPN_USER"
+}
+
 # Remove stale X locks from a previous run
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 
+prepare_home
 vpn_prepare
 
 # VNC
