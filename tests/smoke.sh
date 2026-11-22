@@ -1,7 +1,9 @@
 #!/bin/bash
 # Smoke tests that need no VPN login. Run on the Docker host after `docker compose up -d --build`.
 # Waits until the container is ready and runs every check. Stops danted twice, the second time while a tunnel
-# interface of another address exists, and checks the SOCKS5 proxy after run_service restarts it. Restarts the
+# interface of another address exists, and checks the SOCKS5 proxy after run_service restarts it. Puts a rule
+# before the firewall's rules in INPUT and in FORWARD, as the VPN client may do when it connects, checks that the
+# firewall moves its rules back to the top and keeps the other rule, and removes that rule again. Restarts the
 # container, waits again and runs every check once more, then restarts it once more while giving the temporary
 # tunnel interface its address fails. Then recreates the container on an empty data directory of its own under
 # the repository's tmp/ and runs every check there. On that directory it recreates the container with
@@ -265,6 +267,48 @@ socks5_port_is_danteds() {
     in_c sh -c 'pgrep -x -u socks danted >/dev/null && ss -Hltne "sport = :1080" | grep -q " uid:$(id -u socks) "'
 }
 
+# Succeed when the container was created with the sysctl net.ipv4.ip_forward=1. Forwarding in the container is
+# also on when the container inherits the host's setting, as a new network namespace does by default, so its
+# value in the container alone does not show that the compose file sets it.
+ip_forward_is_set() {
+    local value
+    value=$(docker inspect -f '{{index .HostConfig.Sysctls "net.ipv4.ip_forward"}}' cisco-vpn) || return 1
+    [ "$value" = 1 ] && return 0
+    echo "net.ipv4.ip_forward in the container's sysctls is '$value'"
+    return 1
+}
+
+# Succeed when each of the firewall's rules appears exactly once in the container's filter and nat tables.
+# iptables -S may print the conntrack states in either order.
+firewall_rules_are_unique() {
+    local rules rule count
+    rules=$(in_c sh -c 'iptables -S && iptables -t nat -S') || return 1
+    for rule in \
+        '-A INPUT -m conntrack --ctstate (RELATED,ESTABLISHED|ESTABLISHED,RELATED) -j ACCEPT' \
+        '-A INPUT -i cscotun0 -p tcp -j DROP' \
+        '-A FORWARD -i eth0 -o cscotun0 -j ACCEPT' \
+        '-A FORWARD -i cscotun0 -o eth0 -m conntrack --ctstate (RELATED,ESTABLISHED|ESTABLISHED,RELATED) -j ACCEPT' \
+        '-A POSTROUTING -o cscotun0 -j MASQUERADE'; do
+        count=$(grep -cxE -- "$rule" <<<"$rules")
+        if [ "$count" != 1 ]; then
+            echo "'$rule' appears $count times"
+            return 1
+        fi
+    done
+}
+
+# Succeed when the firewall logged, since the time $1, exactly one line that it put its rules first in INPUT and
+# one that it did so in FORWARD, and nothing else: it logs a repair once, and nothing when its rules are first
+firewall_repaired_input_and_forward_once() {
+    local lines expected
+    lines=$(docker logs --since "$1" cisco-vpn 2>&1 | grep '^\[firewall\]' | sort)
+    expected=$(printf '[firewall] put the rules first in the %s chain of the filter table\n' FORWARD INPUT)
+    [ "$lines" = "$expected" ] && return 0
+    echo "firewall lines since $1:"
+    printf '%s\n' "$lines"
+    return 1
+}
+
 # Checks of the SOCKS5 proxy of a container started without SOCKS_PASSWD and NODANTED, while no VPN is
 # connected. The temporary tunnel interface for danted's start is removed before danted's ready line is logged.
 run_socks5_checks() {
@@ -294,6 +338,19 @@ run_checks() {
     check "default VNC size is 1280x720" vnc_size_is 1280x720
     check "VNC reads the password file in vpnuser's home" in_c sh -c 'ps -o args= -C Xtigervnc | grep -q -- "-PasswordFile $1"' sh "/home/vpnuser/$vnc_passwd"
     check "VNC password file is a regular file of vpnuser's with mode 600" vnc_passwd_is_private
+    run_firewall_checks
+}
+
+# Checks of the firewall's rules and of forwarding for route mode
+# The single-quoted commands are expanded by the sh -c that runs them
+# shellcheck disable=SC2016
+run_firewall_checks() {
+    check "container forwards IPv4 packets" in_c sh -c '[ "$(sysctl -n net.ipv4.ip_forward)" = 1 ]'
+    check "container is created with net.ipv4.ip_forward=1" ip_forward_is_set
+    check "INPUT starts with the firewall's two rules" in_c sh -c 'iptables -S INPUT | sed -n 2,3p | tr "\n" " " | grep -qE -- "(RELATED,ESTABLISHED|ESTABLISHED,RELATED) -j ACCEPT.*-i cscotun0 -p tcp -j DROP"'
+    check "FORWARD starts with the firewall's two rules" in_c sh -c 'iptables -S FORWARD | sed -n 2,3p | tr "\n" " " | grep -q -- "-i eth0 -o cscotun0 -j ACCEPT.*-i cscotun0 -o eth0"'
+    check "traffic out of the tunnel is masqueraded" in_c sh -c 'iptables -t nat -S POSTROUTING | grep -q -- "-o cscotun0 -j MASQUERADE"'
+    check "each firewall rule appears once" firewall_rules_are_unique
 }
 
 check "services started" wait_ready
@@ -311,6 +368,18 @@ check "tunnel interface with address 10.0.0.2/32 is created" in_c sh -c 'ip tunt
 restart_danted_checks
 check "tunnel interface is kept" in_c sh -c 'ip -o addr show dev cscotun0 | grep -q " inet 10.0.0.2/32 "'
 check "tunnel interface is removed" in_c ip tuntap del mode tun cscotun0
+
+# The firewall checks its rules every 5 seconds, so within 12 seconds it repairs each chain once and then finds
+# its rules first at least once more
+echo "--- after a rule is put before the firewall's rules ---"
+inserted_at=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
+check "a rule is inserted at the top of INPUT" in_c iptables -I INPUT 1 -j RETURN
+check "a rule is inserted at the top of FORWARD" in_c iptables -I FORWARD 1 -j RETURN
+sleep 12
+run_firewall_checks
+check "inserted rules are kept" in_c sh -c 'iptables -S INPUT | grep -qx -- "-A INPUT -j RETURN" && iptables -S FORWARD | grep -qx -- "-A FORWARD -j RETURN"'
+check "firewall logged one repair of INPUT and one of FORWARD" firewall_repaired_input_and_forward_once "$inserted_at"
+check "inserted rules are removed" in_c sh -c 'iptables -D INPUT -j RETURN && iptables -D FORWARD -j RETURN && ! iptables -S | grep -q -- "-j RETURN"'
 
 echo "--- after docker restart ---"
 check "container restarts" docker restart cisco-vpn
