@@ -58,7 +58,7 @@ VNC_PASSWD_FILE=/home/$VPN_USER/.vnc/passwd
 prepare_vnc_password() {
     local vnc_password=$PASSWORD
     if [ -z "$vnc_password" ]; then
-        [ -s "$VNC_PASSWD_FILE" ] && return
+        [ -e "$VNC_PASSWD_FILE" ] && return
         vnc_password=password
         log "warning: PASSWORD is not set and no VNC password is saved; the VNC password is 'password'"
     fi
