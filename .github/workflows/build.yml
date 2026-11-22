@@ -30,6 +30,59 @@ jobs:
             exit 1
           fi
 
+      # Pushing to an existing public package would publish the image, so an existing package must be
+      # private. When the GitHub API finds no package (HTTP 404), the push creates one with the
+      # repository's visibility, which the step above requires to be private. Any other answer stops the build.
+      - name: Check the image destination
+        id: image
+        env:
+          # Full image name ghcr.io/<owner>/<name>; without the variable IMAGE_NAME, ghcr.io/<owner>/<repository>
+          IMAGE_NAME: ${{ vars.IMAGE_NAME || format('ghcr.io/{0}', github.repository) }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Image names must be lowercase, and GitHub owner and repository names can contain uppercase letters
+          image=${IMAGE_NAME,,}
+          if ! [[ $image =~ ^ghcr\.io/([a-z0-9-]+)/([a-z0-9][a-z0-9._-]*)$ ]]; then
+            echo "::error::The image name '$image' is not of the form ghcr.io/<owner>/<name>"
+            exit 1
+          fi
+          owner=${BASH_REMATCH[1]}
+          name=${BASH_REMATCH[2]}
+
+          response=$RUNNER_TEMP/github-api.json
+          # github_api <path>: prints the HTTP status code (000 when the request fails) and saves the body to $response
+          github_api() {
+            curl -sS -o "$response" -w '%{http_code}' \
+              -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com$1" || true
+          }
+          # json_field <field>: prints the field of the saved body, or nothing when the body is not a JSON object
+          json_field() {
+            jq -r --arg field "$1" '.[$field] // empty' "$response" 2>/dev/null || true
+          }
+
+          status=$(github_api "/users/$owner")
+          case "$status $(json_field type)" in
+            "200 User") scope=users ;;
+            "200 Organization") scope=orgs ;;
+            *)
+              echo "::error::Cannot tell whether $owner is a user or an organization (GitHub API: HTTP $status)"
+              exit 1
+              ;;
+          esac
+
+          status=$(github_api "/$scope/$owner/packages/container/$name")
+          visibility=$(json_field visibility)
+          if [ "$status" = 404 ]; then
+            echo "The GitHub API finds no package $image (HTTP 404); the push creates it"
+          elif [ "$status" = 200 ] && [ "$visibility" = private ]; then
+            echo "The package $image is private"
+          else
+            echo "::error::The package $image must be private or not exist yet; the GitHub API answered HTTP $status, visibility '$visibility'"
+            exit 1
+          fi
+          echo "name=$image" >>"$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v7
 
       - name: Download and check the Cisco package
@@ -69,15 +122,6 @@ jobs:
             echo "version=$version"
             echo "file=$file"
           } >>"$GITHUB_OUTPUT"
-
-      - name: Set the image name
-        id: image
-        env:
-          # Full image name on ghcr.io; without the variable IMAGE_NAME, ghcr.io/<owner>/<repository>
-          IMAGE_NAME: ${{ vars.IMAGE_NAME || format('ghcr.io/{0}', github.repository) }}
-        run: |
-          # Image names must be lowercase, and GitHub owner and repository names can contain uppercase letters
-          echo "name=${IMAGE_NAME,,}" >>"$GITHUB_OUTPUT"
 
       # A docker-container builder: build-push-action adds a provenance attestation by default, and the
       # default docker driver fails to build one when the Docker daemon uses the classic image store
