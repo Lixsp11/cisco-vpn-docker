@@ -23,6 +23,8 @@ services:
       # once the VPN is connected. Without it, a warning is logged and that access is off until turned on in the
       # Cisco window.
       VPN_SERVER: ${VPN_SERVER:-}
+      # openconnect image: extra arguments of openconnect, split on whitespace; quotes in it are not removed
+      CLI_OPTS: ${CLI_OPTS:-}
       # VNC password (only the first 8 characters of its first line count; empty keeps the saved one, and
       # without a saved one the password is "password") and window size (default 1280x720)
       PASSWORD: ${PASSWORD:-}
@@ -43,6 +45,7 @@ services:
       - "127.0.0.1:6080:6080"   # noVNC
       - "127.0.0.1:1080:1080"   # SOCKS5
       - "127.0.0.1:8888:8888"   # HTTP
+      - "127.0.0.1:29786:29786" # openconnect image: the browser's return to openconnect after a single sign-on
     volumes:
       # Home directory of the GUI user: the Cisco user preferences (.vpn/.anyconnect), the VNC password
       # (.vnc/passwd) and anything else the Cisco client and its login window save there

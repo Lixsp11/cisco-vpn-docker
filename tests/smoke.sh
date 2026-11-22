@@ -34,9 +34,16 @@
 # The test data directory and the copies of the files compared across a recreate are removed before the
 # container is recreated on it and left in place afterwards.
 # The checks follow the VPN client of the container's image, cisco or openconnect, as its build wrote it to
-# /etc/vpn-type: the tunnel interface is the client's, and the image must hold only that client's software. The
-# checks of the Cisco client's processes, login record, preferences and client profile, of the unmounted
-# resolv.conf and hosts, and of the VPN_SERVER cases run only on the Cisco image.
+# /etc/vpn-type: the tunnel interface is the client's, and the image must hold only that client's software, and
+# diag.sh must print that client's version. The checks of the Cisco client's processes, login record, preferences
+# and client profile, of the unmounted resolv.conf and hosts, and of the VPN_SERVER cases above run only on the
+# Cisco image. On the openconnect image, every recreate leaves VPN_SERVER empty unless it sets it, so that
+# openconnect does not connect to the configured gateway; the checks of the empty data directory also check that
+# the login terminal waits for VPN_SERVER, which is logged once, and that the callback port is not forwarded. Then
+# it recreates the container with VPN_SERVER=127.0.0.1 and CLI_OPTS set: it checks that the host reaches a test
+# listener on [::1]:29786 in the container through 127.0.0.1:29786 and cannot reach VNC on 5901, then starts a test
+# gateway in the container that asks for single sign-on in an external browser, and checks that the login URL is
+# logged, that openconnect runs with CLI_OPTS and listens for the callback, and that the host reaches that listener.
 # Exits 0 when every check passes, 1 otherwise.
 
 # lib.sh is linted on its own
@@ -72,6 +79,99 @@ unreachable_addr=192.0.2.1
 # Web server that the keepalive checks start in the container for PING_ADDR_URL, and the file of its request log
 keepalive_url=http://127.0.0.1:18080/
 keepalive_log=/tmp/ka.log
+
+# Port of openconnect's listener for the callback of a single sign-on in an external browser, which the compose file
+# publishes on the host's 127.0.0.1
+callback_port=29786
+# Test gateway of the openconnect checks, in the container: its address, the certificate file that it writes and
+# openconnect trusts through CLI_OPTS, and the login URL that it gives openconnect
+test_gateway=127.0.0.1
+test_gateway_cert=/tmp/smoke-gateway.pem
+test_login_url=https://127.0.0.1/smoke-sso-login
+# CLI_OPTS of the openconnect checks; it must reach openconnect as these two arguments
+test_cli_opts="--cafile=$test_gateway_cert --useragent=smoke-test-agent"
+# External browser of openconnect, which prints the login URL
+login_url_printer=/usr/local/bin/print-login-url.sh
+
+# Test gateway for openconnect: an HTTPS server on 127.0.0.1:443 that answers openconnect's first request, the
+# XML POST of the AnyConnect protocol, with a login form that asks for single sign-on in an external browser. The
+# form is the one that a Cisco gateway sent openconnect 9.01 for single sign-on, with sso-v2-browser-mode
+# "external" added, which makes openconnect run its external browser (process_auth_form in library.c). It writes a
+# self-signed certificate for 127.0.0.1 to argv[1] and its key next to it before it listens.
+gateway_server=$(
+    cat <<'EOF'
+import datetime
+import http.server
+import ipaddress
+import ssl
+import sys
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+
+AUTH_REQUEST = b"""<?xml version="1.0" encoding="UTF-8"?>
+<config-auth client="vpn" type="auth-request" aggregate-auth-version="2">
+<opaque is-for="sg">
+<tunnel-group>smoke</tunnel-group>
+<auth-method>single-sign-on-v2</auth-method>
+<auth-method>single-sign-on-external-browser</auth-method>
+</opaque>
+<auth id="main">
+<title>Login</title>
+<message>Log in with single sign-on.</message>
+<sso-v2-login>https://127.0.0.1/smoke-sso-login</sso-v2-login>
+<sso-v2-login-final>https://127.0.0.1/smoke-sso-final</sso-v2-login-final>
+<sso-v2-token-cookie-name>acSamlv2Token</sso-v2-token-cookie-name>
+<sso-v2-browser-mode>external</sso-v2-browser-mode>
+<form>
+<input type="sso" name="sso-token"></input>
+</form>
+</auth>
+</config-auth>
+"""
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/xml; charset=utf-8")
+        self.send_header("Content-Length", str(len(AUTH_REQUEST)))
+        self.end_headers()
+        self.wfile.write(AUTH_REQUEST)
+
+
+cert_file = sys.argv[1]
+key = ec.generate_private_key(ec.SECP256R1())
+name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+now = datetime.datetime.now(datetime.timezone.utc)
+cert = (
+    x509.CertificateBuilder()
+    .subject_name(name)
+    .issuer_name(name)
+    .public_key(key.public_key())
+    .serial_number(x509.random_serial_number())
+    .not_valid_before(now - datetime.timedelta(hours=1))
+    .not_valid_after(now + datetime.timedelta(days=1))
+    .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
+    .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+    .sign(key, hashes.SHA256())
+)
+with open(cert_file + ".key", "wb") as f:
+    f.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+with open(cert_file, "wb") as f:
+    f.write(cert.public_bytes(serialization.Encoding.PEM))
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(cert_file, cert_file + ".key")
+server = http.server.HTTPServer(("127.0.0.1", 443), Handler)
+server.socket = context.wrap_socket(server.socket, server_side=True)
+server.serve_forever()
+EOF
+)
 
 # Server for PING_ADDR_URL that never answers: it listens on the web server's port and never accepts a connection.
 # The kernel still completes the connections in the listen queue, so a request is sent and then waits.
@@ -189,9 +289,17 @@ EOF
 
 # Recreate the container with the repository's compose file and .env, from any working directory.
 # The arguments are environment assignments for docker compose, such as CISCO_VPN_DATA=<directory>;
-# an empty assignment such as PASSWORD= replaces a value set in .env.
+# an empty assignment such as PASSWORD= replaces a value set in .env. On the openconnect image, VPN_SERVER is empty
+# unless an argument sets it, so that openconnect does not connect to the configured gateway.
 recreate() {
-    env "$@" docker compose -f "$repo/docker-compose.yml" up -d --force-recreate
+    local defaults=()
+    [ "$vpn_type" = openconnect ] && defaults=(VPN_SERVER=)
+    env "${defaults[@]}" "$@" docker compose -f "$repo/docker-compose.yml" up -d --force-recreate
+}
+
+# Recreate the container with the configured settings of the compose file and .env
+recreate_configured() {
+    docker compose -f "$repo/docker-compose.yml" up -d --force-recreate
 }
 
 # Wait until vpnui (csc_ui) of the container's current start has logged the preferences it read
@@ -678,6 +786,162 @@ run_socks5_checks() {
     check "no temporary tunnel interface is left" tunnel_interface_is_gone
 }
 
+# Succeed when diag.sh in the container prints the version of the image's client and no error about a missing
+# file or package, as it would for the other client's
+diag_shows_client() {
+    local output pattern
+    output=$(in_c diag.sh) || return 1
+    case $vpn_type in
+        cisco) pattern='^cisco-secure-client-vpn [0-9]' ;;
+        openconnect) pattern='^OpenConnect version v[0-9]' ;;
+    esac
+    if ! grep -qE "$pattern" <<<"$output"; then
+        echo "diag.sh prints no line that matches '$pattern'"
+        return 1
+    fi
+    ! grep -E 'No such file or directory|no packages found' <<<"$output"
+}
+
+# Succeed when the login terminal of the openconnect image waits without openconnect: the only process that the
+# xterm runs is sleep infinity
+login_terminal_waits() {
+    local xterm_pid children
+    xterm_pid=$(in_c pgrep -x xterm) || {
+        echo "xterm is not running"
+        return 1
+    }
+    children=$(in_c pgrep -a -P "$xterm_pid")
+    if [ "$(grep -c . <<<"$children")" != 1 ] || ! grep -qE '^[0-9]+ sleep infinity$' <<<"$children"; then
+        printf 'the processes of the xterm are:\n%s\n' "$children"
+        return 1
+    fi
+    ! in_c pgrep -a -x openconnect
+}
+
+# Succeed when, after the container has run for 15 seconds, the entrypoint has logged exactly one line about
+# VPN_SERVER since its current start, the error that it is not set, and the login terminal has logged nothing.
+# 15 seconds is longer than the pause between two starts of openconnect.
+missing_vpn_server_logged_once() {
+    local started lines
+    started=$(docker inspect -f '{{.State.StartedAt}}' cisco-vpn) || return 1
+    while [ "$(date +%s)" -lt "$(($(date -d "$started" +%s) + 15))" ]; do
+        sleep 1
+    done
+    lines=$(docker logs --since "$started" cisco-vpn 2>&1 | grep -E '^\[start\].*VPN_SERVER|^\[openconnect\]')
+    if [ "$(grep -c . <<<"$lines")" = 1 ] && grep -q '^\[start\] error: VPN_SERVER is not set' <<<"$lines"; then
+        return 0
+    fi
+    printf 'lines about VPN_SERVER and of the login terminal since %s:\n%s\n' "$started" "$lines"
+    return 1
+}
+
+# Succeed when the callback port is not forwarded in the container: no nat rule redirects it and socat does not run
+callback_port_is_not_forwarded() {
+    local rules
+    rules=$(in_c iptables -t nat -S PREROUTING) || return 1
+    if grep -- "--dport $callback_port " <<<"$rules"; then
+        return 1
+    fi
+    ! in_c pgrep -a -x socat
+}
+
+# Succeed when the entrypoint started no part of the openconnect login since the container's current start: it
+# logged nothing about VPN_SERVER, which it does when it starts the login terminal without it, and the login
+# terminal logged nothing
+openconnect_logged_nothing() {
+    local since
+    since=$(docker inspect -f '{{.State.StartedAt}}' cisco-vpn) || return 1
+    ! docker logs --since "$since" cisco-vpn 2>&1 | grep -E '^\[start\].*VPN_SERVER|^\[openconnect\]'
+}
+
+# Start a web server on [::1]:29786 in the container, the address and port where openconnect listens for the
+# callback, which answers the path /callback-test with "reached"
+start_test_listener() {
+    docker exec -d cisco-vpn sh -c "mkdir -p /tmp/smoke-callback && echo reached >/tmp/smoke-callback/callback-test &&
+        exec python3 -m http.server $callback_port --bind ::1 --directory /tmp/smoke-callback"
+}
+
+# Succeed when the host gets "reached" for http://127.0.0.1:29786/callback-test within 10 seconds
+host_reaches_test_listener() {
+    local body deadline=$((SECONDS + 10))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        body=$(curl -fsS --noproxy '' --max-time 5 "http://127.0.0.1:$callback_port/callback-test" 2>&1) &&
+            [ "$body" = reached ] && return 0
+        sleep 1
+    done
+    echo "the host got: $body"
+    return 1
+}
+
+# Succeed when the host can connect to port $1 of the container's address on the compose network; with "not" as $2,
+# when it cannot
+host_connects_to_port() {
+    local ip status=0
+    ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' cisco-vpn) || return 1
+    # The single-quoted script is expanded by the bash that runs it
+    # shellcheck disable=SC2016
+    timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' bash "$ip" "$1" 2>/dev/null || status=1
+    if [ "${2:-}" = not ]; then
+        [ "$status" = 1 ] && return 0
+        echo "the host connects to $ip:$1"
+        return 1
+    fi
+    [ "$status" = 0 ] && return 0
+    echo "the host cannot connect to $ip:$1"
+    return 1
+}
+
+# Succeed when openconnect runs in the container with exactly the arguments $@, the first one being its name
+openconnect_argv_is() {
+    local pid argv
+    pid=$(in_c pgrep -x openconnect) || {
+        echo "openconnect is not running"
+        return 1
+    }
+    argv=$(in_c cat "/proc/$pid/cmdline" | tr '\0' '\n')
+    [ "$argv" = "$(printf '%s\n' "$@")" ] && return 0
+    printf 'openconnect runs with the arguments:\n%s\n' "$argv"
+    return 1
+}
+
+# Succeed when the output of openconnect, which its external browser inherits, goes to the login terminal
+openconnect_writes_to_terminal() {
+    local pid fd target
+    pid=$(in_c pgrep -x openconnect) || {
+        echo "openconnect is not running"
+        return 1
+    }
+    for fd in 1 2; do
+        target=$(in_c readlink "/proc/$pid/fd/$fd") || return 1
+        if ! [[ $target =~ ^/dev/pts/[0-9]+$ ]]; then
+            echo "file descriptor $fd of openconnect is $target"
+            return 1
+        fi
+    done
+}
+
+# Succeed when openconnect, and nothing else, listens on the callback port in the container, on [::1]
+callback_listener_is_openconnects() {
+    local listeners
+    listeners=$(in_c ss -Hltnp "sport = :$callback_port") || return 1
+    if [ "$(grep -c . <<<"$listeners")" = 1 ] &&
+        grep -qE "^LISTEN .* \[::1\]:$callback_port .*\"openconnect\"" <<<"$listeners"; then
+        return 0
+    fi
+    printf 'listeners on port %s:\n%s\n' "$callback_port" "$listeners"
+    return 1
+}
+
+# Succeed when the host gets openconnect's answer to a request that is not a callback, 404 Not Found, from
+# http://127.0.0.1:29786/
+host_reaches_callback_listener() {
+    local code
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --noproxy '' --max-time 5 "http://127.0.0.1:$callback_port/")
+    [ "$code" = 404 ] && return 0
+    echo "the host got the status $code"
+    return 1
+}
+
 # Succeed when the container finds none of the commands $@; print the ones that it finds
 commands_are_missing() {
     local cmd status=0
@@ -725,6 +989,8 @@ run_checks() {
         check "vpnui runs as vpnuser" in_c sh -c '[ "$(ps -o user= -C vpnui | head -1)" = vpnuser ]'
         check "vpnuser's processes have neither PASSWORD nor SOCKS_PASSWD" gui_has_no_secrets
         check "utmp record points to an ancestor of vpnui" in_c sh -c "$utmp_check"
+    else
+        check "login terminal runs as root" in_c sh -c '[ "$(ps -o user= -C xterm | head -1)" = root ]'
     fi
     # --noproxy '' keeps a NO_PROXY setting on the host from sending the request around the proxy
     check "HTTP proxy works" curl -fsS -o /dev/null --noproxy '' -x http://127.0.0.1:8888 https://deb.debian.org/
@@ -759,6 +1025,7 @@ echo "--- image of the $vpn_type client, tunnel interface $vpn_tun ---"
 
 check "services started" wait_ready
 run_image_checks
+check "diag.sh prints the $vpn_type client's version and no missing file" diag_shows_client
 run_checks
 run_socks5_checks
 
@@ -828,6 +1095,12 @@ if [ "$vpn_type" = cisco ]; then
     check "default preferences are in the test data directory" test -f "$test_data/$prefs"
     check "no client profile is written without VPN_SERVER" profile_is absent
     check "missing VPN_SERVER warning is logged" wait_log '^\[start\] warning: VPN_SERVER is not set'
+else
+    # openconnect needs VPN_SERVER: the login terminal says so and waits, without retrying
+    check "missing VPN_SERVER error is logged" wait_log '^\[start\] error: VPN_SERVER is not set'
+    check "login terminal waits without openconnect" login_terminal_waits
+    check "callback port is not forwarded without VPN_SERVER" callback_port_is_not_forwarded
+    check "missing VPN_SERVER is logged once and the login terminal logs nothing" missing_vpn_server_logged_once
 fi
 check "VNC password file holds the default password" vnc_passwd_holds password
 check "default VNC password warning is logged" wait_log '^\[start\] warning: PASSWORD is not set'
@@ -856,6 +1129,8 @@ check "container exits with an error" container_exits_with_error
 check "firewall failure is logged" wait_log '^\[start\] error: cannot put the firewall rules in place'
 if [ "$vpn_type" = cisco ]; then
     check "vpnagentd is not started" vpnagentd_logged_nothing
+else
+    check "login terminal is not started" openconnect_logged_nothing
 fi
 
 echo "--- with SOCKS_USER and SOCKS_PASSWD set ---"
@@ -1023,6 +1298,33 @@ if [ "$vpn_type" = cisco ]; then
     check "vpnui reads the user's LocalLanAccess: false" local_lan_access_is false
 fi
 
+# The login of the openconnect image, up to the point where the user would open the login URL. Until the test gateway
+# runs, openconnect fails to connect and starts again after a pause, and nothing listens on the callback port, so a
+# test listener takes its place first. The test gateway writes its certificate before it listens, so openconnect
+# never connects to it without the certificate it trusts.
+if [ "$vpn_type" = openconnect ]; then
+    echo "--- with VPN_SERVER set to a test gateway that asks for single sign-on in an external browser ---"
+    check "container is recreated with VPN_SERVER=$test_gateway and CLI_OPTS" recreate CISCO_VPN_DATA="$test_data" \
+        PASSWORD= VNC_SIZE= SOCKS_USER= SOCKS_PASSWD= NODANTED= PING_ADDR= PING_ADDR_URL= PING_INTERVAL= \
+        VPN_SERVER="$test_gateway" CLI_OPTS="$test_cli_opts"
+    check "services started after recreate" wait_ready
+    check "nothing is logged about VPN_SERVER" nothing_logged_about_vpn_server
+    check "test listener on [::1]:$callback_port is started" start_test_listener
+    check "host reaches the test listener through 127.0.0.1:$callback_port" host_reaches_test_listener
+    check "host connects to the container's port 6080 (noVNC)" host_connects_to_port 6080
+    check "host cannot connect to the container's port 5901 (VNC)" host_connects_to_port 5901 not
+    check "test listener is stopped" in_c pkill -f "http.server $callback_port"
+    check "test gateway is started" docker exec -d cisco-vpn python3 -c "$gateway_server" "$test_gateway_cert"
+    check "login URL is logged within 45 seconds" \
+        wait_log "^\[openconnect\] open this URL in your browser to log in: $test_login_url\$" "" 45
+    # shellcheck disable=SC2086
+    check "openconnect runs with CLI_OPTS split on whitespace" openconnect_argv_is openconnect --protocol=anyconnect \
+        --external-browser="$login_url_printer" $test_cli_opts "$test_gateway"
+    check "openconnect writes to the login terminal" openconnect_writes_to_terminal
+    check "openconnect listens for the callback on [::1]:$callback_port" callback_listener_is_openconnects
+    check "host reaches openconnect's callback listener through 127.0.0.1:$callback_port" host_reaches_callback_listener
+fi
+
 # A passwd.new left next to the password file must not decide the new file's mode
 echo "--- with PASSWORD and VNC_SIZE set ---"
 check "passwd.new with mode 644 is created" plant_passwd_new file
@@ -1065,7 +1367,7 @@ check "VNC password file is unchanged" cmp "$saved_vnc_passwd" "$test_data/$vnc_
 check "VNC accepts the saved password" vnc_accepts pw1
 
 echo "--- back on the configured data directory ---"
-check "container is recreated" recreate
+check "container is recreated" recreate_configured
 check "services started after recreate" wait_ready
 
 finish
