@@ -122,10 +122,10 @@ vpn_start() {
         log "error: $LOGIN_ERROR; openconnect is not started until that is changed and the container is recreated"
     else
         # The firewall, danted and the forward use VPN_TUN, so openconnect must not choose another interface. The
-        # last --interface counts, so this one also wins over one that sets_interface does not see, such as one
-        # in a file of --config.
-        OPENCONNECT_ARGS=(--protocol=anyconnect --external-browser=/usr/local/bin/print-login-url.sh "${CLI_ARGS[@]}"
-            "--interface=$VPN_TUN" "$VPN_SERVER")
+        # fixed options come before the arguments of CLI_OPTS, so that an option at its end that takes a value, such
+        # as -u, cannot take one of them as its value, and "--" ends the options before VPN_SERVER.
+        OPENCONNECT_ARGS=(--protocol=anyconnect --external-browser=/usr/local/bin/print-login-url.sh
+            "--interface=$VPN_TUN" "${CLI_ARGS[@]}" -- "$VPN_SERVER")
         start_callback_forward
     fi
     # Reopen the login terminal when it is closed

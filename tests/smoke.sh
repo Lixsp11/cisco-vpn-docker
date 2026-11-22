@@ -47,7 +47,7 @@
 # it recreates the container with VPN_SERVER=127.0.0.1 and CLI_OPTS set: it checks that the host reaches a test
 # listener on [::1]:29786 in the container through 127.0.0.1:29786 and cannot reach VNC on 5901, then starts a test
 # gateway in the container that asks for single sign-on in an external browser, and checks that the login URL is
-# logged, that openconnect runs with the arguments of CLI_OPTS and --interface=tun0 and listens for the callback, and
+# logged, that openconnect runs with --interface=tun0 before the arguments of CLI_OPTS and listens for the callback, and
 # that the host reaches that listener, also after it stops socat and closes the login terminal. Then it recreates the
 # container with CLI_OPTS=--interface=tun1 and checks that openconnect is refused, and checks how the container
 # splits other values of CLI_OPTS and which of them set the tunnel interface.
@@ -95,9 +95,10 @@ callback_port=29786
 test_gateway=127.0.0.1
 test_gateway_cert=/tmp/smoke-gateway.pem
 test_login_url=https://127.0.0.1/smoke-sso-login
-# CLI_OPTS of the openconnect checks; it must reach openconnect as the two arguments --cafile=<certificate file> and
-# --useragent=smoke test agent
-test_cli_opts="--cafile=$test_gateway_cert --useragent='smoke test agent'"
+# CLI_OPTS of the openconnect checks; it must reach openconnect as the three arguments --cafile=<certificate file>,
+# --useragent=smoke test agent and -u. The -u at its end takes the next argument as its value, which must be neither
+# --interface=tun0 nor the gateway.
+test_cli_opts="--cafile=$test_gateway_cert --useragent='smoke test agent' -u"
 # External browser of openconnect, which prints the login URL
 login_url_printer=/usr/local/bin/print-login-url.sh
 
@@ -1400,9 +1401,10 @@ if [ "$vpn_type" = openconnect ]; then
     check "test gateway is started" docker exec -d cisco-vpn python3 -c "$gateway_server" "$test_gateway_cert"
     check "login URL is logged within 45 seconds" \
         wait_log "^\[openconnect\] open this URL in your browser to log in: $test_login_url\$" "" 45
-    check "openconnect runs with the arguments of CLI_OPTS, the quoted one whole, and --interface=$vpn_tun" \
+    # The login URL above shows that openconnect still took the gateway as its server
+    check "openconnect runs with --interface=$vpn_tun before the arguments of CLI_OPTS, the quoted one whole" \
         openconnect_argv_is openconnect --protocol=anyconnect --external-browser="$login_url_printer" \
-        --cafile="$test_gateway_cert" "--useragent=smoke test agent" --interface="$vpn_tun" "$test_gateway"
+        --interface="$vpn_tun" --cafile="$test_gateway_cert" "--useragent=smoke test agent" -u -- "$test_gateway"
     check "openconnect writes to the login terminal" openconnect_writes_to_terminal
     check "openconnect listens for the callback on [::1]:$callback_port" callback_listener_is_openconnects
     check "host reaches openconnect's callback listener through 127.0.0.1:$callback_port" host_reaches_callback_listener
