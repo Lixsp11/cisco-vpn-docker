@@ -50,6 +50,8 @@ Set the variables in a `.env` file next to `docker-compose.yml`, or in the envir
 
 A saved VNC password stays in the data directory, so `PASSWORD` can be removed from `.env` after the first start.
 
+The names and meanings match docker-easyconnect. Its other variables, such as `EXIT`, `MAX_RETRY`, `URLWIN`, `CLIP_TEXT`, `TYPE` and `FORWARD`, are not supported.
+
 ### Example compose file
 
 `docker-compose.yml` sets:
