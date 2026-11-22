@@ -30,57 +30,55 @@ jobs:
             exit 1
           fi
 
-      # Pushing to an existing public package would publish the image, so an existing package must be
-      # private. When the GitHub API finds no package (HTTP 404), the push creates one with the
-      # repository's visibility, which the step above requires to be private. Any other answer stops the build.
+      # Pushing to a public package would publish the image. ghcr.io lets anyone pull a public package
+      # without credentials, so this step asks it for anonymous pull access: granted stops the build.
+      # Refused (HTTP 401, 403 or 404) means that the package is private or does not exist yet; a new
+      # package gets the repository's visibility, which the step above requires to be private.
+      # Any other answer stops the build.
       - name: Check the image destination
         id: image
         env:
           # Full image name ghcr.io/<owner>/<name>; without the variable IMAGE_NAME, ghcr.io/<owner>/<repository>
           IMAGE_NAME: ${{ vars.IMAGE_NAME || format('ghcr.io/{0}', github.repository) }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          refuse() {
+            echo "::error::$1"
+            exit 1
+          }
+
           # Image names must be lowercase, and GitHub owner and repository names can contain uppercase letters
           image=${IMAGE_NAME,,}
-          if ! [[ $image =~ ^ghcr\.io/([a-z0-9-]+)/([a-z0-9][a-z0-9._-]*)$ ]]; then
-            echo "::error::The image name '$image' is not of the form ghcr.io/<owner>/<name>"
-            exit 1
+          if ! [[ $image =~ ^ghcr\.io/([a-z0-9-]+/[a-z0-9][a-z0-9._-]*)$ ]]; then
+            refuse "The image name '$image' is not of the form ghcr.io/<owner>/<name>"
           fi
-          owner=${BASH_REMATCH[1]}
-          name=${BASH_REMATCH[2]}
+          repository=${BASH_REMATCH[1]}
+          refused="ghcr.io refuses anonymous pulls of $image; the package is private or does not exist yet"
+          unclear="Cannot tell whether $image is public"
 
-          response=$RUNNER_TEMP/github-api.json
-          # github_api <path>: prints the HTTP status code (000 when the request fails) and saves the body to $response
-          github_api() {
-            curl -sS -o "$response" -w '%{http_code}' \
-              -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
-              "https://api.github.com$1" || true
-          }
-          # json_field <field>: prints the field of the saved body, or nothing when the body is not a JSON object
-          json_field() {
-            jq -r --arg field "$1" '.[$field] // empty' "$response" 2>/dev/null || true
-          }
-
-          status=$(github_api "/users/$owner")
-          case "$status $(json_field type)" in
-            "200 User") scope=users ;;
-            "200 Organization") scope=orgs ;;
+          # Anonymous pull token from the registry's token service (the realm in its WWW-Authenticate header);
+          # curl prints the HTTP status code, or 000 when the request fails
+          response=$RUNNER_TEMP/ghcr-token.json
+          status=$(curl -sS -o "$response" -w '%{http_code}' \
+            "https://ghcr.io/token?scope=repository:$repository:pull&service=ghcr.io" || true)
+          case $status in
+            401 | 403 | 404)
+              echo "$refused (token service: HTTP $status)"
+              ;;
+            200)
+              token=$(jq -r '.token // empty' "$response" 2>/dev/null || true)
+              [ -n "$token" ] || refuse "$unclear: the token service answered HTTP 200 without a token"
+              status=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
+                "https://ghcr.io/v2/$repository/tags/list" || true)
+              case $status in
+                200) refuse "The package $image is public: anyone can pull it without credentials" ;;
+                401 | 403 | 404) echo "$refused (tag list: HTTP $status)" ;;
+                *) refuse "$unclear: the tag list answered HTTP $status" ;;
+              esac
+              ;;
             *)
-              echo "::error::Cannot tell whether $owner is a user or an organization (GitHub API: HTTP $status)"
-              exit 1
+              refuse "$unclear: the token service answered HTTP $status"
               ;;
           esac
-
-          status=$(github_api "/$scope/$owner/packages/container/$name")
-          visibility=$(json_field visibility)
-          if [ "$status" = 404 ]; then
-            echo "The GitHub API finds no package $image (HTTP 404); the push creates it"
-          elif [ "$status" = 200 ] && [ "$visibility" = private ]; then
-            echo "The package $image is private"
-          else
-            echo "::error::The package $image must be private or not exist yet; the GitHub API answered HTTP $status, visibility '$visibility'"
-            exit 1
-          fi
           echo "name=$image" >>"$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v7

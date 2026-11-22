@@ -44,7 +44,7 @@ The image is tagged with the package version and `latest`. The package on ghcr.i
 
 - The repository is private. A package that a workflow creates gets the visibility of the repository.
 - The image name has the form above.
-- The GitHub API reports the package as private, or finds no package (HTTP 404), in which case the push creates it. Any other answer, such as a public package or an API error, stops the workflow.
+- ghcr.io refuses anonymous pulls of the image (HTTP 401, 403 or 404), so the package is private or does not exist yet. A package that does not exist yet is created by the push. When anyone can pull the image without credentials, or when ghcr.io gives any other answer or cannot be reached, the workflow stops.
 
 ## Configuration
 
