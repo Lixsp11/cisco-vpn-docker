@@ -194,21 +194,26 @@ start_keepalive() {
     fi
 }
 
+# Seconds that one keepalive check may take in all, name resolution included, as the timeout of
+# docker-easyconnect's keep_pinging_url. timeout runs with --foreground, which keeps it and the check in this
+# script's process group: the kill in stop_all then also ends a check in progress.
+KEEPALIVE_TIMEOUT=10
+
 # Every $1 seconds, ping the address $2 once, as docker-easyconnect's keep_pinging does, and log when it does not
-# answer within 1 second
+# answer within 1 second or the check takes more than KEEPALIVE_TIMEOUT seconds
 keep_pinging() {
     while sleep "$1"; do
-        busybox ping -c1 -W1 -w1 "$2" >/dev/null 2>&1 || echo "$2 unreachable"
+        timeout --foreground "$KEEPALIVE_TIMEOUT" busybox ping -c1 -W1 -w1 -- "$2" >/dev/null 2>&1 ||
+            echo "$2 unreachable"
     done
 }
 
 # Every $1 seconds, request the URL $2 without downloading it, as docker-easyconnect's keep_pinging_url does for
-# servers that do not answer pings, and log when the request fails or takes more than 10 seconds.
-# Both outputs of timeout go to /dev/null: timeout runs in a process group of its own, which the kill in stop_all
-# does not reach, so a request in progress must not keep the log pipe open while the container stops.
+# servers that do not answer pings, and log when the request fails or takes more than KEEPALIVE_TIMEOUT seconds
 keep_pinging_url() {
     while sleep "$1"; do
-        timeout 10 busybox wget -q --spider "$2" >/dev/null 2>&1 || echo "$2 unreachable"
+        timeout --foreground "$KEEPALIVE_TIMEOUT" busybox wget -q --spider -- "$2" >/dev/null 2>&1 ||
+            echo "$2 unreachable"
     done
 }
 
