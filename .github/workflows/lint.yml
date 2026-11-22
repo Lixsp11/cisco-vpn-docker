@@ -1,0 +1,23 @@
+name: Lint
+
+# Runs only when started by hand (Actions tab, gh workflow run or the REST API)
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install pre-commit
+        run: pip install -r requirements-dev.txt
+
+      - name: Run the pre-commit hooks
+        run: pre-commit run --all-files --show-diff-on-failure

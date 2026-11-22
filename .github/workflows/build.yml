@@ -1,0 +1,84 @@
+name: Build
+
+# Builds the image from the Cisco package at the secret CSC_DEB_URL and pushes it to ghcr.io.
+# The package on ghcr.io must stay private: the image contains the Cisco Secure Client, and Cisco's
+# software terms do not allow providing it to third parties. Check its visibility in the package settings.
+
+# Runs only when started by hand (Actions tab, gh workflow run or the REST API)
+on: workflow_dispatch
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download and check the Cisco package
+        id: package
+        env:
+          # Download URL of the full Cisco Secure Client VPN package for Linux, such as a presigned object storage URL
+          CSC_DEB_URL: ${{ secrets.CSC_DEB_URL }}
+        run: |
+          if [ -z "$CSC_DEB_URL" ]; then
+            echo "::error::The secret CSC_DEB_URL is not set"
+            exit 1
+          fi
+          download=packages/download.deb
+          # curl's error messages can contain the host name of the URL, which the log masking of the secret does not cover
+          curl -fsSL -o "$download" "$CSC_DEB_URL" 2>/dev/null || {
+            echo "::error::Downloading the package from CSC_DEB_URL failed (curl exit code $?)"
+            exit 1
+          }
+
+          package=$(dpkg-deb -f "$download" Package)
+          architecture=$(dpkg-deb -f "$download" Architecture)
+          version=$(dpkg-deb -f "$download" Version)
+          if [ "$package" != cisco-secure-client-vpn ] || [ "$architecture" != amd64 ]; then
+            echo "::error::The package is $package for $architecture; the Dockerfile installs cisco-secure-client-vpn for amd64"
+            exit 1
+          fi
+          # The version becomes part of the file name and the image tag
+          if ! [[ $version =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::The package version $version cannot be used as an image tag"
+            exit 1
+          fi
+
+          file="cisco-secure-client-vpn_${version}_amd64.deb"
+          mv "$download" "packages/$file"
+          echo "Package $file"
+          {
+            echo "version=$version"
+            echo "file=$file"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Set the image name
+        id: image
+        env:
+          # Full image name on ghcr.io; without the variable IMAGE_NAME, ghcr.io/<owner>/<repository>
+          IMAGE_NAME: ${{ vars.IMAGE_NAME || format('ghcr.io/{0}', github.repository) }}
+        run: |
+          # Image names must be lowercase, and GitHub owner and repository names can contain uppercase letters
+          echo "name=${IMAGE_NAME,,}" >>"$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          # The checked-out directory, which holds the downloaded package; the action's default Git context does not
+          context: .
+          build-args: CSC_DEB=${{ steps.package.outputs.file }}
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ steps.package.outputs.version }}
+            ${{ steps.image.outputs.name }}:latest
