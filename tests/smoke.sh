@@ -1,13 +1,16 @@
 #!/bin/bash
 # Smoke tests that need no VPN login. Run on the Docker host after `docker compose up -d --build`.
-# Waits until the container is ready, runs every check, restarts the container, waits again
-# and runs every check once more. Then checks the persistent home directory: it recreates the container
-# on an empty data directory of its own under the repository's tmp/, changes a preference there and
-# recreates the container again, recreates it with PASSWORD and VNC_SIZE set, once more with both empty and
-# once with a PASSWORD of two lines, once with another PASSWORD that cannot be written because the VNC
-# password's directory is read-only, and finally recreates it on the configured data directory.
-# The test data directory and the copies of the files compared across a recreate are removed at the start
-# of these checks and left in place afterwards.
+# Waits until the container is ready and runs every check. Stops danted twice, the second time while a tunnel
+# interface of another address exists, and checks the SOCKS5 proxy after run_service restarts it. Restarts the
+# container, waits again and runs every check once more. Then recreates the container on an empty data
+# directory of its own under the repository's tmp/ and runs every check there. On that directory it recreates
+# the container with SOCKS_USER and SOCKS_PASSWD set, with only SOCKS_USER set and with NODANTED set. Then it
+# checks the persistent home directory: it changes a preference and recreates the container again, recreates
+# it with PASSWORD and VNC_SIZE set, once more with both empty and once with a PASSWORD of two lines, once with
+# another PASSWORD that cannot be written because the VNC password's directory is read-only, and finally
+# recreates it on the configured data directory.
+# The test data directory and the copies of the files compared across a recreate are removed before the
+# container is recreated on it and left in place afterwards.
 # Exits 0 when every check passes, 1 otherwise.
 
 # lib.sh is linted on its own
@@ -167,6 +170,45 @@ vnc_rejects() {
     return 1
 }
 
+# Wait until danted logs that it listens on port 1080, since the container's current start or since the time $1
+wait_danted() {
+    wait_log '^\[socks5\] danted is listening on port 1080$' "$@"
+}
+
+# Succeed when a request through the SOCKS5 proxy URL $1, such as socks5h://user:password@127.0.0.1:1080, succeeds.
+# --noproxy '' keeps a NO_PROXY setting on the host from sending the request around the proxy.
+socks5_works() {
+    curl -fsS -o /dev/null --noproxy '' -x "$1" https://deb.debian.org/
+}
+
+# Succeed when the SOCKS5 proxy refuses a request through the proxy URL $1 in its handshake.
+# curl then exits with 97 (CURLE_PROXY), and with other codes for other errors, such as 7 when nothing listens.
+socks5_refuses() {
+    local status=0
+    socks5_works "$1" || status=$?
+    [ "$status" -eq 97 ] && return 0
+    echo "curl exited with $status, expected 97 (refused by the SOCKS5 proxy)"
+    return 1
+}
+
+# Stop danted in the container and check the SOCKS5 proxy after run_service restarts it
+restart_danted_checks() {
+    local stopped_at
+    stopped_at=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
+    check "danted is stopped" in_c pkill -x danted
+    check "danted listens again" wait_danted "$stopped_at"
+    check "SOCKS5 proxy works after danted restarts" socks5_works socks5h://127.0.0.1:1080
+}
+
+# Checks of the SOCKS5 proxy of a container started without SOCKS_PASSWD and NODANTED, while no VPN is
+# connected. The temporary tunnel interface for danted's start is removed before danted's ready line is logged.
+run_socks5_checks() {
+    check "danted listens on port 1080" wait_danted
+    check "SOCKS5 port is danted's" in_c sh -c 'ss -ltnp | grep ":1080 " | grep -q danted'
+    check "SOCKS5 proxy works" socks5_works socks5h://127.0.0.1:1080
+    check "no temporary tunnel interface is left" in_c sh -c '! ip link show cscotun0'
+}
+
 # The single-quoted commands are expanded by the sh -c that runs them
 # shellcheck disable=SC2016
 run_checks() {
@@ -191,22 +233,65 @@ run_checks() {
 
 check "services started" wait_ready
 run_checks
+run_socks5_checks
+
+# With no VPN connected, danted's restart creates the temporary tunnel interface again and removes it
+echo "--- after danted exits ---"
+restart_danted_checks
+check "no temporary tunnel interface is left after danted restarts" in_c sh -c '! ip link show cscotun0'
+
+# A tunnel interface without the temporary interface's address is the VPN client's and is kept
+echo "--- after danted exits while a tunnel interface exists ---"
+check "tunnel interface with address 10.0.0.2/32 is created" in_c sh -c 'ip tuntap add mode tun cscotun0 && ip addr add 10.0.0.2/32 dev cscotun0'
+restart_danted_checks
+check "tunnel interface is kept" in_c sh -c 'ip -o addr show dev cscotun0 | grep -q " inet 10.0.0.2/32 "'
+check "tunnel interface is removed" in_c ip tuntap del mode tun cscotun0
 
 echo "--- after docker restart ---"
 check "container restarts" docker restart cisco-vpn
 check "services started after restart" wait_ready
 run_checks
+run_socks5_checks
 
 # Docker creates a missing data directory as root
 echo "--- on an empty data directory ---"
 check "test data directory is removed" rm -rf "$test_data" "$edited_prefs" "$saved_vnc_passwd"
-check "container is recreated on the test data directory" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE=
+check "container is recreated on the test data directory" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
+    SOCKS_USER= SOCKS_PASSWD= NODANTED=
 check "services started after recreate" wait_ready
 run_checks
+run_socks5_checks
 check "default preferences are in the test data directory" test -f "$test_data/$prefs"
 check "VNC password file holds the default password" vnc_passwd_holds password
 check "default VNC password warning is logged" wait_log '^\[start\] warning: PASSWORD is not set'
 check "VNC accepts the default password" vnc_accepts password
+
+echo "--- with SOCKS_USER and SOCKS_PASSWD set ---"
+check "container is recreated with SOCKS_USER and SOCKS_PASSWD" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
+    SOCKS_USER=u SOCKS_PASSWD=p NODANTED=
+check "services started after recreate" wait_ready
+check "danted listens on port 1080" wait_danted
+check "SOCKS5 proxy refuses a client without a username" socks5_refuses socks5h://127.0.0.1:1080
+check "SOCKS5 proxy refuses a wrong password" socks5_refuses socks5h://u:wrong@127.0.0.1:1080
+check "SOCKS5 proxy accepts SOCKS_USER and SOCKS_PASSWD" socks5_works socks5h://u:p@127.0.0.1:1080
+
+# Without SOCKS_PASSWD the proxy needs no username, as in docker-easyconnect
+echo "--- with only SOCKS_USER set ---"
+check "container is recreated with only SOCKS_USER" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
+    SOCKS_USER=u SOCKS_PASSWD= NODANTED=
+check "services started after recreate" wait_ready
+run_socks5_checks
+check "empty SOCKS_PASSWD warning is logged" wait_log '^\[start\] warning: SOCKS_USER is set but SOCKS_PASSWD is empty'
+
+# run_checks takes several seconds, so danted would be listening by the end of it if it had been started
+echo "--- with NODANTED set ---"
+check "container is recreated with NODANTED" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
+    SOCKS_USER= SOCKS_PASSWD= NODANTED=1
+check "services started after recreate" wait_ready
+check "NODANTED is logged" wait_log '^\[start\] NODANTED is set'
+run_checks
+check "danted does not run" in_c sh -c '! pgrep -x danted'
+check "nothing listens on port 1080" in_c sh -c '! ss -ltn | grep ":1080 "'
 
 # A preference file that already exists holds the user's choices and must be kept as a whole:
 # the edit turns LocalLanAccess off and adds a gateway address, and the file is compared byte for byte
