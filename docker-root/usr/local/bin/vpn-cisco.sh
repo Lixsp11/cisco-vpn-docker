@@ -7,8 +7,8 @@
 CSC_BIN=/opt/cisco/secureclient/bin
 
 # Give the GUI user default preferences when it has no preference file yet; an existing file holds
-# the user's own choices and is left alone. vpnui reads ~/.vpn/.anyconnect (and ~/.anyconnect when that
-# is missing; seen with strace) and logs what it read as "Current Preference Settings".
+# the user's own choices and is left alone. vpnui reads its preferences from ~/.vpn/.anyconnect
+# (found with strace) and logs the values it read as "Current Preference Settings".
 # The default turns on "Allow local (LAN) access" so that the host can still reach the container's ports
 # while the tunnel is up; otherwise Cisco's firewall drops new connections from the local network.
 # The gateway must allow local LAN access as well:
