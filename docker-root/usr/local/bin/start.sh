@@ -172,6 +172,17 @@ run_danted() {
     wait "$pid"
 }
 
+# Firewall, before any service starts; the watch then keeps its rules first in their chains.
+# Without the rules the VPN side could open connections to the container's services, so the container stops
+# when they cannot be put in place.
+firewall.sh apply 2>&1 | sed 's/^/[firewall] /'
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    log "error: cannot put the firewall rules in place (the container needs the NET_ADMIN capability);" \
+        "stopping before any service starts"
+    exit 1
+fi
+run_service firewall firewall.sh watch
+
 # Remove stale X locks from a previous run
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 
@@ -196,10 +207,6 @@ run_service flwm flwm
 # noVNC: make the root path open vnc.html
 [ -e /usr/share/novnc/index.html ] || ln -s vnc.html /usr/share/novnc/index.html
 run_service novnc python3 -m websockify --web=/usr/share/novnc 6080 127.0.0.1:5901
-
-# Firewall: its rules are in place before the VPN client starts, and the watch keeps them first in their chains
-firewall.sh apply 2>&1 | sed 's/^/[firewall] /'
-run_service firewall firewall.sh watch
 
 vpn_start
 
