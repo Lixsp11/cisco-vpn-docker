@@ -2,9 +2,12 @@
 # Smoke tests that need no VPN login. Run on the Docker host after `docker compose up -d --build`.
 # Waits until the container is ready and runs every check. Stops danted twice, the second time while a tunnel
 # interface of another address exists, and checks the SOCKS5 proxy after run_service restarts it. Restarts the
-# container, waits again and runs every check once more. Then recreates the container on an empty data
-# directory of its own under the repository's tmp/ and runs every check there. On that directory it recreates
-# the container with SOCKS_USER and SOCKS_PASSWD set, with only SOCKS_USER set and with NODANTED set. Then it
+# container, waits again and runs every check once more, then restarts it once more while giving the temporary
+# tunnel interface its address fails. Then recreates the container on an empty data directory of its own under
+# the repository's tmp/ and runs every check there. On that directory it recreates the container with
+# SOCKS_USER and SOCKS_PASSWD set and restarts it, recreates it with only SOCKS_USER set, with a SOCKS_PASSWD
+# that cannot be set (and restarts it with an account of the proxy's left from an earlier start), with
+# SOCKS_USER naming each of the image's accounts and a malformed SOCKS_USER, and with NODANTED set. Then it
 # checks the persistent home directory: it changes a preference and recreates the container again, recreates
 # it with PASSWORD and VNC_SIZE set, once more with both empty and once with a PASSWORD of two lines, once with
 # another PASSWORD that cannot be written because the VNC password's directory is read-only, and finally
@@ -191,6 +194,59 @@ socks5_refuses() {
     return 1
 }
 
+# Succeed when a request through the SOCKS5 proxy URL $1 fails, for whatever reason
+socks5_fails() {
+    socks5_works "$1" || return 0
+    echo "the request succeeded"
+    return 1
+}
+
+# Succeed when danted does not run in the container and nothing listens on port 1080
+danted_is_off() {
+    in_c sh -c '! pgrep -x danted && ! ss -ltn | grep ":1080 "'
+}
+
+# Succeed when the account $1 in the container has no password: its shadow entry has no hash, which starts with $
+account_has_no_password() {
+    local field
+    field=$(in_c getent shadow "$1" | cut -d: -f2)
+    [ -n "$field" ] && [ "${field#\$}" = "$field" ] && return 0
+    echo "the password field of $1 is '${field:0:4}...'"
+    return 1
+}
+
+# Flag file in the container: while it exists, the ip wrapper of install_ip_wrapper fails "ip addr add"
+fail_ip_addr_flag=/run/smoke-fail-ip-addr-add
+
+# Install an ip wrapper in the container's /usr/local/sbin, which comes before ip's own directory in PATH, and
+# create fail_ip_addr_flag. The wrapper runs the real ip, found in PATH without /usr/local, for everything else.
+install_ip_wrapper() {
+    local real_ip
+    real_ip=$(in_c env PATH=/usr/sbin:/usr/bin:/sbin:/bin sh -c 'command -v ip') || return 1
+    docker exec -i cisco-vpn sh -c 'cat >/usr/local/sbin/ip && chmod 755 /usr/local/sbin/ip' <<EOF || return 1
+#!/bin/sh
+# Installed by tests/smoke.sh: "ip addr add" fails while $fail_ip_addr_flag exists
+if [ "\$1" = addr ] && [ "\$2" = add ] && [ -e $fail_ip_addr_flag ]; then
+    echo "ip addr add fails for the smoke test" >&2
+    exit 2
+fi
+exec $real_ip "\$@"
+EOF
+    in_c touch "$fail_ip_addr_flag"
+}
+
+# Succeed when cscotun0 is missing at least once in about 3 seconds. While giving the temporary interface its
+# address fails, run_service retries every second, and each try creates the interface and removes it at once,
+# so only an interface that stays exists every time.
+tunnel_interface_is_not_kept() {
+    for _ in $(seq 10); do
+        in_c sh -c '! ip link show cscotun0 >/dev/null 2>&1' && return 0
+        sleep 0.3
+    done
+    echo "cscotun0 exists on every try"
+    return 1
+}
+
 # Stop danted in the container and check the SOCKS5 proxy after run_service restarts it
 restart_danted_checks() {
     local stopped_at
@@ -262,6 +318,20 @@ check "services started after restart" wait_ready
 run_checks
 run_socks5_checks
 
+# The restart makes start.sh find the ip wrapper first in PATH; the recreate of the next section removes it
+echo "--- while giving the temporary tunnel interface its address fails ---"
+check "ip wrapper that fails ip addr add is installed" install_ip_wrapper
+check "container restarts" docker restart cisco-vpn
+check "services started after restart" wait_ready
+check "failed address assignment is logged" wait_log '^\[socks5\] warning: cannot give the temporary interface cscotun0 its address'
+check "danted is not started" danted_is_off
+check "temporary tunnel interface is not kept" tunnel_interface_is_not_kept
+assignable_at=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
+check "ip addr add works again" in_c rm "$fail_ip_addr_flag"
+check "danted listens once ip addr add works" wait_danted "$assignable_at"
+check "SOCKS5 proxy works" socks5_works socks5h://127.0.0.1:1080
+check "no temporary tunnel interface is left" in_c sh -c '! ip link show cscotun0'
+
 # Docker creates a missing data directory as root
 echo "--- on an empty data directory ---"
 check "test data directory is removed" rm -rf "$test_data" "$edited_prefs" "$saved_vnc_passwd"
@@ -283,6 +353,12 @@ check "danted listens on port 1080" wait_danted
 check "SOCKS5 proxy refuses a client without a username" socks5_refuses socks5h://127.0.0.1:1080
 check "SOCKS5 proxy refuses a wrong password" socks5_refuses socks5h://u:wrong@127.0.0.1:1080
 check "SOCKS5 proxy accepts SOCKS_USER and SOCKS_PASSWD" socks5_works socks5h://u:p@127.0.0.1:1080
+# The restart finds the account that the first start created for SOCKS_USER and sets its password again
+check "container restarts" docker restart cisco-vpn
+check "services started after restart" wait_ready
+check "danted listens on port 1080 after restart" wait_danted
+check "SOCKS5 proxy refuses a client without a username after restart" socks5_refuses socks5h://127.0.0.1:1080
+check "SOCKS5 proxy accepts SOCKS_USER and SOCKS_PASSWD after restart" socks5_works socks5h://u:p@127.0.0.1:1080
 
 # Without SOCKS_PASSWD the proxy needs no username, as in docker-easyconnect
 echo "--- with only SOCKS_USER set ---"
@@ -291,6 +367,43 @@ check "container is recreated with only SOCKS_USER" recreate CISCO_VPN_DATA="$te
 check "services started after recreate" wait_ready
 run_socks5_checks
 check "empty SOCKS_PASSWD warning is logged" wait_log '^\[start\] warning: SOCKS_USER is set but SOCKS_PASSWD is empty'
+
+# A SOCKS_PASSWD that cannot be set leaves the proxy off, so no older password of SOCKS_USER's account is accepted.
+# The account u is made by hand as an earlier start would have left it: with the comment that start.sh gives
+# the accounts it creates and the password "old". The restart runs start.sh with that account in place.
+echo "--- with a SOCKS_PASSWD that cannot be set ---"
+check "container is recreated with a SOCKS_PASSWD of two lines" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
+    SOCKS_USER=u SOCKS_PASSWD=$'new\nroot:x' NODANTED=
+check "services started after recreate" wait_ready
+check "refused SOCKS_PASSWD is logged" wait_log '^\[start\] error: SOCKS_PASSWD contains a newline'
+check "danted is not started" danted_is_off
+check "root has no password" account_has_no_password root
+check "account u with the password old is created" in_c sh -c \
+    'useradd -r -M -s /usr/sbin/nologin -c "SOCKS5 proxy account" u && echo u:old | chpasswd'
+check "container restarts" docker restart cisco-vpn
+check "services started after restart" wait_ready
+check "refused SOCKS_PASSWD is logged after restart" wait_log '^\[start\] error: SOCKS_PASSWD contains a newline'
+check "danted is not started after restart" danted_is_off
+check "SOCKS5 proxy does not accept the old password" socks5_fails socks5h://u:old@127.0.0.1:1080
+
+# SOCKS_USER must not take over an account that start.sh did not create for the proxy
+for account in root vpnuser socks; do
+    echo "--- with SOCKS_USER=$account ---"
+    check "container is recreated with SOCKS_USER=$account" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
+        SOCKS_USER="$account" SOCKS_PASSWD=p NODANTED=
+    check "services started after recreate" wait_ready
+    check "refused SOCKS_USER is logged" wait_log "^\[start\] error: SOCKS_USER names the existing account $account,"
+    check "danted is not started" danted_is_off
+    check "$account has no password" account_has_no_password "$account"
+done
+
+echo "--- with a malformed SOCKS_USER ---"
+check "container is recreated with SOCKS_USER=bad:name" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
+    SOCKS_USER=bad:name SOCKS_PASSWD=p NODANTED=
+check "services started after recreate" wait_ready
+check "refused SOCKS_USER is logged" wait_log '^\[start\] error: SOCKS_USER is not a valid user name'
+check "danted is not started" danted_is_off
+check "no account is created" in_c sh -c '! grep "^bad" /etc/passwd'
 
 # run_checks takes several seconds, so danted would be listening by the end of it if it had been started
 echo "--- with NODANTED set ---"
