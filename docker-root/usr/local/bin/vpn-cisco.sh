@@ -43,22 +43,25 @@ CSC_PROFILE=/opt/cisco/secureclient/vpn/profile/cisco-vpn-docker.xml
 # https://www.cisco.com/c/en/us/support/docs/security/secure-client-5/221024-configure-local-lan-access-for-secure-cl.html
 # The gateway must allow local LAN access as well. UserControllable keeps the checkbox in the Cisco window, so
 # the user can still turn local LAN access off.
-# VPN_SERVER may contain only letters, digits, dots, hyphens and colons, as host names and IPv4 and IPv6 addresses
-# do, so it cannot change the XML around it. The profile goes to a new file that replaces the old one once it is
-# complete. It is in the image's file system, not in the data directory, so each container writes its own.
+# The profile goes to a new file that replaces the old one once it is complete. It is in the image's file system,
+# not in the data directory. When VPN_SERVER is empty or refused, the profile of an earlier run is removed, so
+# that no gateway and no local LAN access from an earlier configuration stay in effect.
 write_profile() {
     local new
     if [ -z "${VPN_SERVER:-}" ]; then
+        remove_profile
         log "warning: VPN_SERVER is not set, so no client profile turns on local LAN access; once the VPN is" \
             "connected, the host cannot reach noVNC or the proxies unless \"Allow local (LAN) access\" is turned on" \
             "in the Cisco window"
         return
     fi
-    if ! [[ $VPN_SERVER =~ ^[A-Za-z0-9.:-]{1,253}$ ]]; then
+    if ! is_host_or_ip "$VPN_SERVER"; then
+        remove_profile
         log "error: VPN_SERVER is not a host name or an IP address; no client profile is written, so once the VPN" \
             "is connected, the host cannot reach noVNC or the proxies"
         return
     fi
+    # mv -T fails instead of moving the file into a directory of the profile's name
     if new=$(mktemp "$CSC_PROFILE.XXXXXX") &&
         cat >"$new" <<EOF &&
 <?xml version="1.0" encoding="UTF-8"?>
@@ -74,12 +77,44 @@ write_profile() {
   </ServerList>
 </AnyConnectProfile>
 EOF
-        chmod 644 "$new" && mv -f "$new" "$CSC_PROFILE"; then
+        chmod 644 "$new" && mv -fT "$new" "$CSC_PROFILE"; then
         return
     fi
     rm -f "$new"
     log "error: cannot write the client profile $CSC_PROFILE; once the VPN is connected, the host cannot reach" \
         "noVNC or the proxies"
+}
+
+# Remove the profile that write_profile writes, and only that file; log when it exists and cannot be removed
+remove_profile() {
+    rm -f "$CSC_PROFILE" && return 0
+    log "error: cannot remove the client profile $CSC_PROFILE of an earlier run; it may still name a gateway" \
+        "and turn on local LAN access"
+    return 1
+}
+
+# Succeed when $1 is a host name or an IPv4 or IPv6 address. Only letters, digits, dots, hyphens and colons are
+# accepted, so the value cannot change the XML around it. Python's ipaddress module parses the addresses, and a
+# value of only digits and dots or with a colon must be one. A host name has at most 253 characters in labels of
+# 1 to 63 letters, digits and hyphens that neither start nor end with a hyphen (RFC 1123).
+is_host_or_ip() {
+    [[ $1 =~ ^[A-Za-z0-9.:-]+$ ]] || return 1
+    python3 - "$1" <<'EOF'
+import ipaddress
+import re
+import sys
+
+value = sys.argv[1]
+try:
+    ipaddress.ip_address(value)
+    sys.exit(0)
+except ValueError:
+    pass
+if re.fullmatch(r"[0-9.]+", value) or ":" in value:
+    sys.exit(1)
+label = r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+sys.exit(0 if len(value) <= 253 and re.fullmatch(rf"{label}(\.{label})*", value) else 1)
+EOF
 }
 
 vpn_prepare() {

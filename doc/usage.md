@@ -54,7 +54,7 @@ Set the variables in a `.env` file next to `docker-compose.yml`, or in the envir
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `VPN_SERVER` | empty | Address of the VPN gateway, a host name or an IP address (letters, digits, `.`, `-` and `:` only). The container writes a Cisco client profile for it that turns on "Allow local (LAN) access", so that the host can still reach noVNC and the proxies once the VPN is connected. See the [FAQ](#how-is-allow-local-lan-access-turned-on-and-what-if-the-gateway-does-not-allow-it). When empty, a warning is logged; any other value logs an error. In both cases no profile is written. |
+| `VPN_SERVER` | empty | Address of the VPN gateway: a host name (labels of up to 63 letters, digits and hyphens, at most 253 characters) or an IPv4 or IPv6 address. The container writes a Cisco client profile for it that turns on "Allow local (LAN) access", so that the host can still reach noVNC and the proxies once the VPN is connected. See the [FAQ](#how-is-allow-local-lan-access-turned-on-and-what-if-the-gateway-does-not-allow-it). When `VPN_SERVER` is empty, a warning is logged. A value that is neither a host name nor an IP address is refused, and an error is logged. In both cases the container writes no profile. |
 | `PASSWORD` | `password` when no password is saved | VNC password. Only the first 8 characters of its first line count. When empty, the saved password is kept. When empty and no password is saved, the password is `password` and a warning is logged. |
 | `VNC_SIZE` | `1280x720` | Size of the VNC display, as `<width>x<height>` |
 | `SOCKS_USER`, `SOCKS_PASSWD` | empty | When both are set, the SOCKS5 proxy requires this username and password. See [SOCKS5 username and password](#socks5-username-and-password). |

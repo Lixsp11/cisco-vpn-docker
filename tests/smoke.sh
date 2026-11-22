@@ -16,8 +16,9 @@
 # it with PING_ADDR set to an address that does not answer, with PING_ADDR and PING_ADDR_URL set to the
 # container's own address and a web server that the checks start in it (and restarts it, then stops it while a
 # keepalive request waits for a server that never answers), with PING_INTERVAL empty and with a PING_INTERVAL of
-# 0. It recreates it with VPN_SERVER set, checks the client profile and restarts it, and with a VPN_SERVER that
-# is not a host name. Then it checks the persistent home directory: it replaces the default preference file
+# 0. It recreates it with VPN_SERVER set, checks the client profile and restarts it, runs vpn_prepare again in it
+# with valid and invalid VPN_SERVER values after a profile was written, and with a directory in the profile's
+# place, and recreates it with a VPN_SERVER that is not a host name. Then it checks the persistent home directory: it replaces the default preference file
 # with one of the user's and recreates the container again, recreates it with PASSWORD and VNC_SIZE set, once more with both empty and once with a PASSWORD of two lines, once with
 # another PASSWORD that cannot be written because the VNC password's directory is read-only, and finally
 # recreates it on the configured data directory.
@@ -50,6 +51,11 @@ csc_profile=/opt/cisco/secureclient/vpn/profile/cisco-vpn-docker.xml
 profile_dir_with_profile=$'AnyConnectProfile.xsd\ncisco-vpn-docker.xml'
 profile_dir_without_profile=AnyConnectProfile.xsd
 test_server=vpn.example.com
+# Host name labels of the longest length allowed and one character longer, and a host name of more than 253
+# characters
+label63=$(printf '%063d' 0 | tr 0 a)
+label64=${label63}a
+too_long_server=$label63.$label63.$label63.$label63
 # Address of the documentation range (TEST-NET-1) that no host answers, for the keepalive's failed pings
 unreachable_addr=192.0.2.1
 # Web server that the keepalive checks start in the container for PING_ADDR_URL, and the file of its request log
@@ -211,6 +217,54 @@ nothing_logged_about_vpn_server() {
     lines=$(docker logs --since "$since" cisco-vpn 2>&1 | grep '^\[start\].*VPN_SERVER')
     [ -z "$lines" ] && return 0
     printf '%s\n' "$lines"
+    return 1
+}
+
+# Run vpn-cisco.sh's vpn_prepare again in the container with VPN_SERVER=$1, as start.sh runs it at start, and
+# print what it logs. The run keeps the container's file system, with the profile of earlier runs.
+rerun_prepare() {
+    # The single-quoted script is expanded by the bash that runs it
+    # shellcheck disable=SC2016
+    docker exec -e VPN_SERVER="$1" cisco-vpn bash -c \
+        'log() { echo "[start] $*"; }; VPN_USER=vpnuser; source /usr/local/bin/vpn-cisco.sh; vpn_prepare' 2>&1
+}
+
+# Succeed when vpn_prepare, run again with VPN_SERVER=$1, logs nothing and writes a profile for it
+accepts_server() {
+    local output
+    output=$(rerun_prepare "$1") || return 1
+    if [ -n "$output" ]; then
+        printf 'vpn_prepare logged:\n%s\n' "$output"
+        return 1
+    fi
+    profile_lists "$1" && profile_dir_holds "$profile_dir_with_profile"
+}
+
+# Succeed when vpn_prepare, run again with VPN_SERVER=$1 after a run that wrote a profile, logs a line that
+# matches the extended regular expression $2 and removes that profile
+removes_profile_for() {
+    local output
+    accepts_server "$test_server" || return 1
+    output=$(rerun_prepare "$1")
+    if ! grep -qE "$2" <<<"$output"; then
+        printf 'vpn_prepare logged:\n%s\n' "$output"
+        return 1
+    fi
+    profile_dir_holds "$profile_dir_without_profile"
+}
+
+# Succeed when vpn_prepare, run again with VPN_SERVER=$1 while a directory that is not empty has the profile's
+# name, logs a line that matches $2 and leaves the directory as it is. The directory is removed afterwards.
+logs_profile_failure() {
+    local output status=0
+    # The single-quoted script is expanded by the sh that runs it
+    # shellcheck disable=SC2016
+    in_c sh -c 'rm -f "$1" && mkdir "$1" && touch "$1/keep"' sh "$csc_profile" || return 1
+    output=$(rerun_prepare "$1")
+    grep -qE "$2" <<<"$output" && in_c test -f "$csc_profile/keep" || status=1
+    in_c rm -r "$csc_profile" || status=1
+    [ "$status" = 0 ] && return 0
+    printf 'vpn_prepare logged:\n%s\n' "$output"
     return 1
 }
 
@@ -798,6 +852,20 @@ check "services started after restart" wait_ready
 check "client profile lists VPN_SERVER after restart" profile_lists "$test_server"
 check "profile directory holds only the schema and the client profile after restart" \
     profile_dir_holds "$profile_dir_with_profile"
+for server in 192.0.2.1 2001:db8::1 "$label63.example.com"; do
+    check "VPN_SERVER=${server:0:24} is accepted" accepts_server "$server"
+done
+for server in : ... vpn..example.com -vpn.example.com vpn-.example.com "$label64.example.com" 192.0.2.256 \
+    01.2.3.4 1:::2 'vpn.example.com"/><x' "$too_long_server"; do
+    check "VPN_SERVER=${server:0:24} is refused and the profile of an earlier run is removed" \
+        removes_profile_for "$server" '^\[start\] error: VPN_SERVER is not a host name or an IP address'
+done
+check "empty VPN_SERVER removes the profile of an earlier run" \
+    removes_profile_for "" '^\[start\] warning: VPN_SERVER is not set'
+check "a profile that cannot be removed is logged" \
+    logs_profile_failure "" '^\[start\] error: cannot remove the client profile'
+check "a profile that cannot be replaced is logged" \
+    logs_profile_failure "$test_server" '^\[start\] error: cannot write the client profile'
 
 # The value goes into the profile's XML, so anything but a host name or an IP address is refused
 echo "--- with a VPN_SERVER that is not a host name ---"
