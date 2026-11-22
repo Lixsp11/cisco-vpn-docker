@@ -83,17 +83,20 @@ prepare_vnc_password() {
 DANTED_CONF=/run/danted.conf
 # Address of the temporary tunnel interface, which tells that interface apart from the VPN client's own
 TEMP_TUN_ADDR=10.0.0.1/32
+# Comment (GECOS field) of the accounts that set_socks_user creates. Only an account with this comment is
+# reused by a later start; any other existing account is never changed.
+SOCKS_ACCOUNT_COMMENT="SOCKS5 proxy account"
 
-# Start the SOCKS5 proxy: set up the proxy's user, write DANTED_CONF and run danted with run_service.
+# Start the SOCKS5 proxy: set up SOCKS_USER's account, write DANTED_CONF and run danted with run_service.
 # The template's VPN_TUN becomes the tunnel interface $VPN_TUN. When SOCKS_USER and SOCKS_PASSWD are both set,
-# the proxy requires them: dante's username method checks them against the system's user database, so
-# SOCKS_USER becomes a system user with the password SOCKS_PASSWD. The method follows from the variables alone,
-# so a failed user setup leaves a proxy that accepts no client.
+# the proxy requires them: dante's username method checks them against the system's user database.
+# If the account cannot be set up, danted is not started at all: the causes are settings that only a new
+# SOCKS_USER or SOCKS_PASSWD can fix, so restarting danted every second would only repeat the error.
 start_danted() {
     local socksmethod=none
     if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASSWD" ]; then
+        set_socks_user || return
         socksmethod=username
-        set_socks_user
     elif [ -n "$SOCKS_USER" ]; then
         log "warning: SOCKS_USER is set but SOCKS_PASSWD is empty; the SOCKS5 proxy requires no username"
     fi
@@ -102,42 +105,68 @@ start_danted() {
     run_service socks5 run_danted
 }
 
-# Create the system user SOCKS_USER if it does not exist and set its password to SOCKS_PASSWD.
-# chpasswd reads "user:password" lines on stdin, so the password is neither on a command line nor in the logs.
-# A newline in either value would make another line, which sets the password of another user, so it is refused.
+# Give SOCKS_USER an account with the password SOCKS_PASSWD: create a system account with SOCKS_ACCOUNT_COMMENT,
+# or reuse one that an earlier start created. Fails, and logs why, when SOCKS_USER is not a plain user name
+# (lowercase letters, digits, _ and -, not starting with a digit or -, at most 32 characters), names an
+# existing account without that comment, such as root or vpnuser, or SOCKS_PASSWD contains a newline,
+# or when creating the account or setting its password fails.
+# chpasswd reads "user:password" lines on stdin, so the password is neither on a command line nor in the logs;
+# a newline would start another line, which sets the password of another account.
 set_socks_user() {
-    if [[ $SOCKS_USER$SOCKS_PASSWD == *$'\n'* ]]; then
-        log "warning: SOCKS_USER or SOCKS_PASSWD contains a newline; the SOCKS5 proxy accepts no client"
-        return
+    local account
+    if ! [[ $SOCKS_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        log "error: SOCKS_USER is not a valid user name; the SOCKS5 proxy is not started"
+        return 1
     fi
-    if { id "$SOCKS_USER" >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin "$SOCKS_USER"; } &&
-        printf '%s:%s\n' "$SOCKS_USER" "$SOCKS_PASSWD" | chpasswd; then
-        log "the SOCKS5 proxy requires the username $SOCKS_USER and the password in SOCKS_PASSWD"
-    else
-        log "warning: cannot set the password of the user $SOCKS_USER; the SOCKS5 proxy accepts no client"
+    if [[ $SOCKS_PASSWD == *$'\n'* ]]; then
+        log "error: SOCKS_PASSWD contains a newline; the SOCKS5 proxy is not started"
+        return 1
     fi
+    if account=$(getent passwd "$SOCKS_USER"); then
+        if [ "$(cut -d: -f5 <<<"$account")" != "$SOCKS_ACCOUNT_COMMENT" ]; then
+            log "error: SOCKS_USER names the existing account $SOCKS_USER, which is not a SOCKS5 proxy account;" \
+                "the SOCKS5 proxy is not started"
+            return 1
+        fi
+    elif ! useradd -r -M -s /usr/sbin/nologin -c "$SOCKS_ACCOUNT_COMMENT" "$SOCKS_USER"; then
+        log "error: cannot create the account $SOCKS_USER; the SOCKS5 proxy is not started"
+        return 1
+    fi
+    if ! printf '%s:%s\n' "$SOCKS_USER" "$SOCKS_PASSWD" | chpasswd; then
+        log "error: cannot set the password of $SOCKS_USER; the SOCKS5 proxy is not started"
+        return 1
+    fi
+    log "the SOCKS5 proxy requires the username $SOCKS_USER and the password in SOCKS_PASSWD"
 }
 
 # Run danted in the foreground on port 1080 and remove the temporary tunnel interface once it listens.
 # danted does not start when an external interface is missing, and the VPN client creates the tunnel interface
 # only when it connects. As in docker-easyconnect's start.sh, a tun interface with the tunnel's name and the
 # address TEMP_TUN_ADDR stands in for it while danted starts. The interface is removed once danted listens or
-# has exited, so that the VPN client can create its own, and only while it has that address.
+# has exited, so that the VPN client can create its own, and only while it has that address. An interface
+# that cannot get the address is removed at once and danted is not started; run_service then tries again.
 run_danted() {
     local pid
     if ! ip link show "$VPN_TUN" >/dev/null 2>&1; then
-        ip tuntap add mode tun "$VPN_TUN" && ip addr add "$TEMP_TUN_ADDR" dev "$VPN_TUN"
+        ip tuntap add mode tun "$VPN_TUN" || return
+        if ! ip addr add "$TEMP_TUN_ADDR" dev "$VPN_TUN"; then
+            echo "warning: cannot give the temporary interface $VPN_TUN its address; danted is not started"
+            ip tuntap del mode tun "$VPN_TUN"
+            return 1
+        fi
     fi
     danted -f "$DANTED_CONF" &
     pid=$!
     while kill -0 "$pid" 2>/dev/null && [ -z "$(ss -Hltn 'sport = :1080')" ]; do
         sleep 0.5
     done
-    if ip -o addr show dev "$VPN_TUN" 2>/dev/null | grep -qF " inet $TEMP_TUN_ADDR "; then
-        ip tuntap del mode tun "$VPN_TUN"
+    # The ready line is logged only after the temporary interface is gone
+    if ip -o addr show dev "$VPN_TUN" 2>/dev/null | grep -qF " inet $TEMP_TUN_ADDR " &&
+        ! ip tuntap del mode tun "$VPN_TUN"; then
+        echo "warning: cannot remove the temporary interface $VPN_TUN; the VPN client may fail to create its tunnel"
+    elif kill -0 "$pid" 2>/dev/null; then
+        echo "danted is listening on port 1080"
     fi
-    # Logged after the removal, so the temporary interface is gone once this line is in the logs
-    kill -0 "$pid" 2>/dev/null && echo "danted is listening on port 1080"
     wait "$pid"
 }
 
