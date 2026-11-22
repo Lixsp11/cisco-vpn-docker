@@ -7,7 +7,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG CSC_DEB=
 
 # packages/ and build-scripts/ of the build context are BuildKit bind mounts, read-only and only while this step
-# runs, so no file of them, not even the installed Cisco package, is in a layer of the image.
+# runs, so no file of them, not even the .deb file of the installed Cisco package, is in a layer of the image.
 # First choose the VPN client, so that a packages/ directory it refuses fails the build before apt runs.
 # select-vpn-client.sh writes cisco or openconnect to /etc/vpn-type.
 # Then install VNC, noVNC, diagnostic tools, proxies and busybox (ping and wget for the keepalive), and the packages

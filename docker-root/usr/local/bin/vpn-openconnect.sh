@@ -50,12 +50,13 @@ parse_cli_opts() {
     wait "$!"
 }
 
-# Succeed when the openconnect arguments $@ set the tunnel interface before the first "--" that is not the value of a
-# short option: with -i, alone, with its value attached or after other short options without an argument, or with
-# --interface or any abbreviation of it, which getopt_long accepts since no other long option of openconnect starts
-# with "i". The check does not know which long options take a value, so it reads the value of a long option given as
-# the next argument as an argument of its own: such a value that starts with -i counts, and a "--" there ends the
-# check, although getopt_long takes that "--" as the value and goes on reading options after it.
+# Succeed when the openconnect arguments $@ set the tunnel interface: with -i, alone, with its value attached or after
+# other short options without an argument, or with --interface or any abbreviation of it, which getopt_long accepts
+# since no other long option of openconnect starts with "i". The check skips the value of a short option given as the
+# next argument and stops at any other "--". It does not know which long options take a value, so it is exact only
+# when long options are given their value with "=": it reads a value given as the next argument as an argument of its
+# own, which then counts itself (-iX), ends the check ("--", which getopt_long takes as the value and goes on reading
+# options) or makes it skip the argument after it (-u).
 sets_interface() {
     local arg options skip=
     for arg; do
