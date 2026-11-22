@@ -10,9 +10,11 @@
 # through both, and another one for a direct request from the host.
 # Route mode: adds a host route for one IPv4 address of the echo service through the container, with the tunnel's
 # MTU, as doc/usage.md describes, checks that a request to that address arrives with the proxies' address, and
-# deletes the route. The route is added only when the VPN is connected, the proxies leave through it, and the host
-# has no route to that address yet. A trap deletes it when the script ends early. It is the only change to the
-# host: the host's routes, iptables rules and resolv.conf are recorded at the start and compared at the end.
+# deletes the route. The route is added only when the VPN is connected, the proxies leave through it, the host's
+# state was recorded and the host has no route to that address yet. The script deletes only a route that its own
+# add created, also from a trap when it ends early, after a signal or a write to a closed output. The route is the
+# only change to the host: the host's routes, iptables rules and resolv.conf are recorded at the start and
+# compared at the end.
 # Finally it reports, without checking, what the persistence acceptance needs to know: the gateway address that
 # the data directory holds and the files in it that changed since the container started, and also the
 # firewall's log lines since then.
@@ -23,7 +25,8 @@
 #   SOCKS5_PROXY  SOCKS5 proxy URL, with the username and password when the proxy requires them
 #                 (default socks5h://127.0.0.1:1080)
 #   GATEWAY       VPN gateway address; when set, the report lists the files in the data directory that contain it
-# Exits 0 when every check passes, 1 otherwise, and 2 when it cannot run.
+# Exits 0 when every check passes, 1 otherwise, and 2 when it cannot run. Sourcing the script defines its
+# functions without running the checks, for tests of the route handling.
 
 # lib.sh is linted on its own
 # shellcheck source=/dev/null
@@ -33,48 +36,81 @@ ECHO_URL=${ECHO_URL:-https://ifconfig.me/ip}
 SOCKS5_PROXY=${SOCKS5_PROXY:-socks5h://127.0.0.1:1080}
 GATEWAY=${GATEWAY:-}
 
-if [ "$(id -u)" != 0 ]; then
-    echo "error: run this script as root; it reads the host's iptables rules and adds and deletes a host route"
-    exit 2
-fi
-if ! [[ $ECHO_URL =~ ^https://[A-Za-z0-9.-]+(/.*)?$ ]]; then
-    echo "error: ECHO_URL must be an https URL without a port"
-    exit 2
-fi
 echo_host=${ECHO_URL#https://}
 echo_host=${echo_host%%/*}
 
 # Address of the temporary tunnel interface that start.sh creates while danted starts
 temp_tun_addr=10.0.0.1/32
 
-# The host route of the route mode checks while it may exist: its destination and gateway
+# The host route that add_route created, while it may exist: its destination and gateway
 route_dest=
 route_via=
+# Output of the last add_route
+route_add_output=
+# Set by the signal traps while add_route defers the signals
+pending_signal=
 
-# Delete the host route of the route mode checks when it exists. Only the route to route_dest through route_via
-# is deleted, never another route to the same destination.
-delete_route() {
-    [ -n "$route_dest" ] || return 0
-    if [ -n "$(ip route show exact "$route_dest" via "$route_via")" ] &&
-        ! ip route del "$route_dest" via "$route_via"; then
-        echo "error: cannot delete the host route to $route_dest via $route_via; delete it by hand"
-        return 1
+# Add the host route to $1 via $2 with MTU $3, and record it as this script's own only when the add succeeds: a
+# route that another process created first, for which the add fails with "File exists", is never deleted here.
+# HUP, INT, TERM and PIPE are deferred from before the add until the route is recorded, and then end the script.
+# Keeps ip's output in route_add_output and returns ip's exit status.
+add_route() {
+    local status=0
+    pending_signal=
+    trap 'pending_signal=1' HUP INT TERM PIPE
+    route_add_output=$(ip route add "$1" via "$2" mtu "$3" 2>&1) || status=$?
+    if [ "$status" = 0 ]; then
+        route_dest=$1
+        route_via=$2
     fi
-    route_dest=
+    trap 'exit 1' HUP INT TERM PIPE
+    [ -z "$pending_signal" ] || exit 1
+    return "$status"
 }
-trap delete_route EXIT
-# The script may run over SSH, so a lost connection ends it like an interrupt, and the EXIT trap still runs
-trap 'exit 1' HUP INT TERM
+
+# Delete the host route that add_route created, if any, and clear the record once the route is gone: when the
+# delete succeeds, or when it fails and a lookup succeeds and finds no such route. Otherwise the record is kept,
+# so that the EXIT trap tries again, and an error goes to stderr.
+delete_route() {
+    local output routes
+    [ -n "$route_dest" ] || return 0
+    if output=$(ip route del "$route_dest" via "$route_via" 2>&1) ||
+        { routes=$(ip route show exact "$route_dest" via "$route_via") && [ -z "$routes" ]; }; then
+        route_dest=
+        route_via=
+        return 0
+    fi
+    printf 'error: cannot delete the host route to %s via %s; delete it by hand: %s\n' \
+        "$route_dest" "$route_via" "$output" >&2
+    return 1
+}
+
+# EXIT trap: delete the host route. The signals, SIGPIPE among them, are ignored first, so that neither another
+# signal nor a closed output stops the delete; a message about it may then fail to be written.
+on_exit() {
+    trap '' HUP INT TERM PIPE
+    delete_route
+}
+
+# Run on_exit when the script ends, also after a signal. The script may run over SSH, where a lost connection
+# sends SIGHUP and a write to the closed output sends SIGPIPE; both end it like an interrupt.
+set_cleanup_traps() {
+    trap on_exit EXIT
+    trap 'exit 1' HUP INT TERM PIPE
+}
 
 # The host's state that the checks must leave as it was
 host_routes() { ip route; }
 host_rules() { iptables -w 5 -S; }
 host_dns() { cat /etc/resolv.conf; }
 
-# Succeed when the output of the command $2 is $1; otherwise print the differences
+# Succeed when the command $2 succeeds and prints $1; otherwise print its errors or the differences
 output_is() {
     local now
-    now=$("$2" 2>&1)
+    if ! now=$("$2" 2>&1); then
+        printf '%s failed:\n%s\n' "$2" "$now"
+        return 1
+    fi
     [ "$now" = "$1" ] && return 0
     diff <(printf '%s\n' "$1") <(printf '%s\n' "$now")
     return 1
@@ -91,6 +127,20 @@ egress_ip() {
 is_ipv4() {
     [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && return 0
     echo "'$1' is not an IPv4 address"
+    return 1
+}
+
+# Succeed when $1 is empty; otherwise print it
+no_errors() {
+    [ -z "$1" ] && return 0
+    printf '%s' "$1"
+    return 1
+}
+
+# Succeed when the exit status $1 is 0; otherwise print $2
+succeeded() {
+    [ "$1" = 0 ] && return 0
+    printf '%s\n' "$2"
     return 1
 }
 
@@ -169,19 +219,22 @@ firewall_stays_quiet() {
     return 1
 }
 
-# Succeed when the host has no route whose destination is exactly $1
+# Succeed when a lookup of the host's routes succeeds and finds none whose destination is exactly $1
 host_has_no_route_to() {
     local routes
-    routes=$(ip route show exact "$1")
+    if ! routes=$(ip route show exact "$1" 2>&1); then
+        printf 'cannot look up the host routes to %s:\n%s\n' "$1" "$routes"
+        return 1
+    fi
     [ -z "$routes" ] && return 0
-    printf 'the host already has a route to %s:\n%s\n' "$1" "$routes"
+    printf 'the host has a route to %s:\n%s\n' "$1" "$routes"
     return 1
 }
 
 # Route mode: route one address of the echo service through the container and check that a request to it
 # arrives with the VPN's address $1
 run_route_checks() {
-    local vpn_ip=$1 echo_ip container_ip tun_mtu routed_ip
+    local vpn_ip=$1 echo_ip container_ip tun_mtu routed_ip status=0
     echo_ip=$(getent ahostsv4 "$echo_host" | awk 'NR == 1 { print $1 }')
     container_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' cisco-vpn)
     tun_mtu=$(in_c cat /sys/class/net/cscotun0/mtu)
@@ -190,11 +243,9 @@ run_route_checks() {
         check "tunnel MTU is known" test "$tun_mtu" -gt 0 &&
         check "host has no route to $echo_ip/32 yet" host_has_no_route_to "$echo_ip/32" || return
     echo "     routing $echo_ip/32 via $container_ip mtu $tun_mtu"
-    # Set before the add, so that the trap also deletes a route that an interrupted add created
-    route_dest=$echo_ip/32
-    route_via=$container_ip
-    check "host route to $echo_ip/32 through the container is added" \
-        ip route add "$route_dest" via "$route_via" mtu "$tun_mtu"
+    add_route "$echo_ip/32" "$container_ip" "$tun_mtu" || status=$?
+    check "host route to $echo_ip/32 through the container is added" succeeded "$status" "$route_add_output" ||
+        return
     routed_ip=$(egress_ip --noproxy '*' --resolve "$echo_host:443:$echo_ip" 2>&1)
     check "a routed request arrives with the VPN's address" same "$routed_ip" "$vpn_ip"
     delete_route
@@ -232,59 +283,83 @@ report_persistence() {
         "$(docker logs --since "$started" cisco-vpn 2>&1 | grep '^\[firewall\]')"
 }
 
-host_routes_before=$(host_routes 2>&1)
-host_rules_before=$(host_rules 2>&1)
-host_dns_before=$(host_dns 2>&1)
+main() {
+    if [ "$(id -u)" != 0 ]; then
+        echo "error: run this script as root; it reads the host's iptables rules and adds and deletes a host route"
+        exit 2
+    fi
+    if ! [[ $ECHO_URL =~ ^https://[A-Za-z0-9.-]+(/.*)?$ ]]; then
+        echo "error: ECHO_URL must be an https URL without a port"
+        exit 2
+    fi
+    set_cleanup_traps
 
-echo "--- connection ---"
-check "container runs" container_runs
-connected=
-check "VPN is connected" vpn_is_connected && connected=1
-check "tunnel interface cscotun0 is the Cisco client's" tunnel_is_ciscos
+    # The host's state at the start; the route is added only when all of it was recorded
+    snapshot_errors=
+    host_routes_before=$(host_routes 2>&1) || snapshot_errors+="ip route: $host_routes_before"$'\n'
+    host_rules_before=$(host_rules 2>&1) || snapshot_errors+="iptables -S: $host_rules_before"$'\n'
+    host_dns_before=$(host_dns 2>&1) || snapshot_errors+="resolv.conf: $host_dns_before"$'\n'
 
-echo "--- firewall ---"
-check "Cisco client's ciscovpn* chains exist" cisco_chains_exist
-check "INPUT jumps to a Cisco client chain" jumps_to_cisco_chain INPUT
-check "FORWARD jumps to a Cisco client chain" jumps_to_cisco_chain FORWARD
-run_firewall_checks
-check "firewall logs no repair or failure in 12 seconds" firewall_stays_quiet
+    echo "--- connection ---"
+    check "host routes, iptables rules and resolv.conf are recorded" no_errors "$snapshot_errors"
+    check "container runs" container_runs
+    connected=
+    check "VPN is connected" vpn_is_connected && connected=1
+    check "tunnel interface cscotun0 is the Cisco client's" tunnel_is_ciscos
 
-echo "--- local LAN access ---"
-check "vpnui reads LocalLanAccess: true" local_lan_access_is true
-check "gateway grants local LAN access" wait_log 'IPv4 Local LAN Wildcard: received' "" 1
-check "noVNC page is reachable" curl -fsS -o /dev/null --noproxy '*' --max-time 10 http://127.0.0.1:6080/vnc.html
+    echo "--- firewall ---"
+    check "Cisco client's ciscovpn* chains exist" cisco_chains_exist
+    check "INPUT jumps to a Cisco client chain" jumps_to_cisco_chain INPUT
+    check "FORWARD jumps to a Cisco client chain" jumps_to_cisco_chain FORWARD
+    run_firewall_checks
+    check "firewall logs no repair or failure in 12 seconds" firewall_stays_quiet
 
-echo "--- proxies ---"
-host_ip=$(egress_ip --noproxy '*' 2>&1)
-socks_ip=$(egress_ip --noproxy '' -x "$SOCKS5_PROXY" 2>&1)
-http_ip=$(egress_ip --noproxy '' -x http://127.0.0.1:8888 2>&1)
-echo "     direct: $host_ip; SOCKS5: $socks_ip; HTTP: $http_ip"
-host_ip_found=
-socks_ip_found=
-check "host's direct egress address is found" is_ipv4 "$host_ip" && host_ip_found=1
-check "egress address through the SOCKS5 proxy is found" is_ipv4 "$socks_ip" && socks_ip_found=1
-check "egress address through the HTTP proxy is found" is_ipv4 "$http_ip"
-check "HTTP proxy leaves with the SOCKS5 proxy's address" same "$http_ip" "$socks_ip"
-# The VPN's egress address, once the SOCKS5 proxy is known to leave with another address than the host
-vpn_ip=
-if [ -n "$host_ip_found" ] && [ -n "$socks_ip_found" ]; then
-    check "SOCKS5 proxy leaves with another address than the host" different "$socks_ip" "$host_ip" &&
-        vpn_ip=$socks_ip
+    echo "--- local LAN access ---"
+    check "vpnui reads LocalLanAccess: true" local_lan_access_is true
+    check "gateway grants local LAN access" wait_log 'IPv4 Local LAN Wildcard: received' "" 1
+    check "noVNC page is reachable" curl -fsS -o /dev/null --noproxy '*' --max-time 10 http://127.0.0.1:6080/vnc.html
+
+    echo "--- proxies ---"
+    host_ip=$(egress_ip --noproxy '*' 2>&1)
+    socks_ip=$(egress_ip --noproxy '' -x "$SOCKS5_PROXY" 2>&1)
+    http_ip=$(egress_ip --noproxy '' -x http://127.0.0.1:8888 2>&1)
+    echo "     direct: $host_ip; SOCKS5: $socks_ip; HTTP: $http_ip"
+    host_ip_found=
+    socks_ip_found=
+    check "host's direct egress address is found" is_ipv4 "$host_ip" && host_ip_found=1
+    check "egress address through the SOCKS5 proxy is found" is_ipv4 "$socks_ip" && socks_ip_found=1
+    check "egress address through the HTTP proxy is found" is_ipv4 "$http_ip"
+    check "HTTP proxy leaves with the SOCKS5 proxy's address" same "$http_ip" "$socks_ip"
+    # The VPN's egress address, once the SOCKS5 proxy is known to leave with another address than the host
+    vpn_ip=
+    if [ -n "$host_ip_found" ] && [ -n "$socks_ip_found" ]; then
+        check "SOCKS5 proxy leaves with another address than the host" different "$socks_ip" "$host_ip" &&
+            vpn_ip=$socks_ip
+    fi
+
+    echo "--- route mode ---"
+    if [ -n "$connected" ] && [ -n "$vpn_ip" ] && [ -z "$snapshot_errors" ]; then
+        run_route_checks "$vpn_ip"
+    else
+        check "route mode: not checked, since the VPN is not connected, the proxies do not leave through it or the host's state was not recorded" false
+    fi
+
+    echo "--- host ---"
+    if [ -z "$snapshot_errors" ]; then
+        check "host routes are unchanged" output_is "$host_routes_before" host_routes
+        check "host iptables rules are unchanged" output_is "$host_rules_before" host_rules
+        check "host resolv.conf is unchanged" output_is "$host_dns_before" host_dns
+    else
+        check "host state: not compared, since it was not recorded at the start" false
+    fi
+
+    echo "--- persistence (reported, not checked) ---"
+    report_persistence
+
+    finish
+}
+
+# Run the checks when the script is run; when it is sourced, only define its functions
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
 fi
-
-echo "--- route mode ---"
-if [ -n "$connected" ] && [ -n "$vpn_ip" ]; then
-    run_route_checks "$vpn_ip"
-else
-    check "route mode: not checked, since the VPN is not connected or the proxies do not leave through it" false
-fi
-
-echo "--- host ---"
-check "host routes are unchanged" output_is "$host_routes_before" host_routes
-check "host iptables rules are unchanged" output_is "$host_rules_before" host_rules
-check "host resolv.conf is unchanged" output_is "$host_dns_before" host_dns
-
-echo "--- persistence (reported, not checked) ---"
-report_persistence
-
-finish
