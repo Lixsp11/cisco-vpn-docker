@@ -1,9 +1,14 @@
 #!/bin/bash
-# Cisco Secure Client steps of the entrypoint. start.sh sources this file and calls only:
+# Cisco Secure Client steps of the entrypoint. start.sh sources this file and uses only:
+#   VPN_TUN      the tunnel interface of the client
 #   vpn_prepare  preparation before any service starts
 #   vpn_start    starts the client processes with start.sh's run_service
 # Uses log, run_service, VPN_USER and DISPLAY from start.sh; vpn_prepare runs after start.sh has given
 # the home directory to VPN_USER.
+
+# Tunnel interface that the Cisco client creates when it connects; start.sh uses it
+# shellcheck disable=SC2034
+VPN_TUN=cscotun0
 
 CSC_BIN=/opt/cisco/secureclient/bin
 

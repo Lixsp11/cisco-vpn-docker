@@ -1,0 +1,39 @@
+# Template of the dante (danted) configuration for the SOCKS5 proxy on port 1080.
+# start.sh writes the configuration to /run/danted.conf: VPN_TUN becomes the VPN client's tunnel interface,
+# and socksmethod becomes username when SOCKS_USER and SOCKS_PASSWD are both set.
+# Taken from docker-root/etc/danted.conf.sample of docker-easyconnect
+# (https://github.com/docker-easyconnect/docker-easyconnect, WTFPL).
+
+errorlog: /dev/stderr
+
+internal: 0.0.0.0 port = 1080
+# Connections leave through the container's network or the VPN tunnel: with external.rotation route,
+# danted uses the address of the interface that the kernel routes the destination through
+external: eth0
+external: VPN_TUN
+external.rotation: route
+
+user.privileged: root
+user.notprivileged: socks
+
+clientmethod: none
+socksmethod: none
+
+# Rule processing stops at the first match; no match blocks the connection
+
+client pass {
+    from: 0/0 to: 0/0
+    log: error
+}
+
+socks pass {
+    from: 0/0 to: 0/0
+    command: bind connect udpassociate
+    log: error
+}
+
+socks pass {
+    from: 0/0 to: 0/0
+    command: bindreply udpreply
+    log: error
+}

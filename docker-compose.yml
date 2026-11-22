@@ -15,6 +15,11 @@ services:
       # and window size. The defaults are in start.sh.
       PASSWORD: ${PASSWORD:-}
       VNC_SIZE: ${VNC_SIZE:-}
+      # The SOCKS5 proxy requires a username and password only when SOCKS_USER and SOCKS_PASSWD are both set;
+      # a non-empty NODANTED leaves the SOCKS5 proxy off
+      SOCKS_USER: ${SOCKS_USER:-}
+      SOCKS_PASSWD: ${SOCKS_PASSWD:-}
+      NODANTED: ${NODANTED:-}
     ports:
       - "127.0.0.1:6080:6080"   # noVNC
       - "127.0.0.1:1080:1080"   # SOCKS5

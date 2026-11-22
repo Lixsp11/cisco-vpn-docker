@@ -6,7 +6,7 @@
 # Its home directory is the volume that keeps the client's settings.
 VPN_USER=vpnuser
 
-# VPN client steps: defines vpn_prepare and vpn_start
+# VPN client steps: defines VPN_TUN, vpn_prepare and vpn_start
 # shellcheck source=/dev/null
 source /usr/local/bin/vpn-cisco.sh
 
@@ -79,6 +79,68 @@ prepare_vnc_password() {
     ' sh "$VNC_PASSWD_FILE" || log "warning: cannot write the VNC password file $VNC_PASSWD_FILE"
 }
 
+# Configuration that start_danted writes from the template /etc/danted.conf.sample
+DANTED_CONF=/run/danted.conf
+# Address of the temporary tunnel interface, which tells that interface apart from the VPN client's own
+TEMP_TUN_ADDR=10.0.0.1/32
+
+# Start the SOCKS5 proxy: set up the proxy's user, write DANTED_CONF and run danted with run_service.
+# The template's VPN_TUN becomes the tunnel interface $VPN_TUN. When SOCKS_USER and SOCKS_PASSWD are both set,
+# the proxy requires them: dante's username method checks them against the system's user database, so
+# SOCKS_USER becomes a system user with the password SOCKS_PASSWD. The method follows from the variables alone,
+# so a failed user setup leaves a proxy that accepts no client.
+start_danted() {
+    local socksmethod=none
+    if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASSWD" ]; then
+        socksmethod=username
+        set_socks_user
+    elif [ -n "$SOCKS_USER" ]; then
+        log "warning: SOCKS_USER is set but SOCKS_PASSWD is empty; the SOCKS5 proxy requires no username"
+    fi
+    sed -e "s/^external: VPN_TUN\$/external: $VPN_TUN/" -e "s/^socksmethod: none\$/socksmethod: $socksmethod/" \
+        /etc/danted.conf.sample >"$DANTED_CONF"
+    run_service socks5 run_danted
+}
+
+# Create the system user SOCKS_USER if it does not exist and set its password to SOCKS_PASSWD.
+# chpasswd reads "user:password" lines on stdin, so the password is neither on a command line nor in the logs.
+# A newline in either value would make another line, which sets the password of another user, so it is refused.
+set_socks_user() {
+    if [[ $SOCKS_USER$SOCKS_PASSWD == *$'\n'* ]]; then
+        log "warning: SOCKS_USER or SOCKS_PASSWD contains a newline; the SOCKS5 proxy accepts no client"
+        return
+    fi
+    if { id "$SOCKS_USER" >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin "$SOCKS_USER"; } &&
+        printf '%s:%s\n' "$SOCKS_USER" "$SOCKS_PASSWD" | chpasswd; then
+        log "the SOCKS5 proxy requires the username $SOCKS_USER and the password in SOCKS_PASSWD"
+    else
+        log "warning: cannot set the password of the user $SOCKS_USER; the SOCKS5 proxy accepts no client"
+    fi
+}
+
+# Run danted in the foreground on port 1080 and remove the temporary tunnel interface once it listens.
+# danted does not start when an external interface is missing, and the VPN client creates the tunnel interface
+# only when it connects. As in docker-easyconnect's start.sh, a tun interface with the tunnel's name and the
+# address TEMP_TUN_ADDR stands in for it while danted starts. The interface is removed once danted listens or
+# has exited, so that the VPN client can create its own, and only while it has that address.
+run_danted() {
+    local pid
+    if ! ip link show "$VPN_TUN" >/dev/null 2>&1; then
+        ip tuntap add mode tun "$VPN_TUN" && ip addr add "$TEMP_TUN_ADDR" dev "$VPN_TUN"
+    fi
+    danted -f "$DANTED_CONF" &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null && [ -z "$(ss -Hltn 'sport = :1080')" ]; do
+        sleep 0.5
+    done
+    if ip -o addr show dev "$VPN_TUN" 2>/dev/null | grep -qF " inet $TEMP_TUN_ADDR "; then
+        ip tuntap del mode tun "$VPN_TUN"
+    fi
+    # Logged after the removal, so the temporary interface is gone once this line is in the logs
+    kill -0 "$pid" 2>/dev/null && echo "danted is listening on port 1080"
+    wait "$pid"
+}
+
 # Remove stale X locks from a previous run
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 
@@ -106,12 +168,12 @@ run_service novnc python3 -m websockify --web=/usr/share/novnc 6080 127.0.0.1:59
 
 vpn_start
 
-# SOCKS5 proxy: forwards by kernel routing, not bound to the tunnel interface
-socks_args=(-i 0.0.0.0 -p 1080)
-if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASSWD" ]; then
-    socks_args+=(-u "$SOCKS_USER" -P "$SOCKS_PASSWD")
+# SOCKS5 proxy, unless NODANTED is set
+if [ -n "$NODANTED" ]; then
+    log "NODANTED is set; the SOCKS5 proxy is not started"
+else
+    start_danted
 fi
-run_service socks5 microsocks "${socks_args[@]}"
 
 # HTTP proxy
 run_service http tinyproxy -d -c /etc/tinyproxy.conf

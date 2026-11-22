@@ -17,13 +17,15 @@ RUN apt-get update \
       novnc python3-websockify \
       libwebkit2gtk-4.1-0 dbus-x11 xdg-utils fonts-wqy-microhei ca-certificates \
       iproute2 iptables procps psmisc \
-      microsocks tinyproxy-bin \
+      dante-server tinyproxy-bin \
  && apt-get install -y --no-install-recommends /tmp/${CSC_DEB} \
  && rm -f /tmp/${CSC_DEB} \
  && rm -rf /var/lib/apt/lists/*
 
-# Unprivileged user that runs the Cisco GUI (vpnagentd refuses to verify server certificates as root)
-RUN useradd -m -s /bin/bash vpnuser
+# Unprivileged user that runs the Cisco GUI (vpnagentd refuses to verify server certificates as root),
+# and the system user of danted's unprivileged operations (user.notprivileged in /etc/danted.conf.sample)
+RUN useradd -m -s /bin/bash vpnuser \
+ && useradd -r -s /usr/sbin/nologin socks
 
 COPY docker-root/ /
 # The executable bit may be lost when copying files around; set it explicitly
