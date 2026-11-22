@@ -54,6 +54,7 @@ Set the variables in a `.env` file next to `docker-compose.yml`, or in the envir
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `VPN_SERVER` | empty | Address of the VPN gateway, a host name or an IP address (letters, digits, `.`, `-` and `:` only). The container writes a Cisco client profile for it that turns on "Allow local (LAN) access", so that the host can still reach noVNC and the proxies once the VPN is connected. See the [FAQ](#how-is-allow-local-lan-access-turned-on-and-what-if-the-gateway-does-not-allow-it). When empty, a warning is logged; any other value logs an error. In both cases no profile is written. |
 | `PASSWORD` | `password` when no password is saved | VNC password. Only the first 8 characters of its first line count. When empty, the saved password is kept. When empty and no password is saved, the password is `password` and a warning is logged. |
 | `VNC_SIZE` | `1280x720` | Size of the VNC display, as `<width>x<height>` |
 | `SOCKS_USER`, `SOCKS_PASSWD` | empty | When both are set, the SOCKS5 proxy requires this username and password. See [SOCKS5 username and password](#socks5-username-and-password). |
@@ -97,7 +98,7 @@ ssh -N -L 127.0.0.1:6080:127.0.0.1:6080 -L 127.0.0.1:1080:127.0.0.1:1080 -L 127.
 ## Logging in
 
 1. Open `http://127.0.0.1:6080/vnc.html` and enter the VNC password.
-2. In the Cisco window, enter the VPN address (for example `vpn.example.com`) and click Connect.
+2. In the Cisco window, enter the VPN address exactly as in `VPN_SERVER` (for example `vpn.example.com`) and click Connect.
 3. Complete the login in the window that opens. It is the Cisco client's built-in browser, so SAML single sign-on, MFA and any other step that the gateway asks for work there.
 
 The Cisco window reopens about 1 second after it is closed. When the VPN session ends or expires, log in again in the Cisco window. `docker restart cisco-vpn` and `docker compose down` end the VPN session.
@@ -179,7 +180,7 @@ The compose file mounts the host directory `CISCO_VPN_DATA` (default `$HOME/.cis
 
 The directory holds:
 
-- `.vpn/.anyconnect`: the Cisco client's user preference file. The client reads its user preferences from `~/.vpn/.anyconnect` (found with strace in testing) and logs the values it read as `Current Preference Settings`. When the file does not exist, the container creates it with "Allow local (LAN) access" turned on (see the [FAQ](#why-is-allow-local-lan-access-on-by-default-and-what-if-the-gateway-does-not-allow-it)). The client uses its defaults for every other preference:
+- `.vpn/.anyconnect`: the Cisco window's user preference file. The window reads it at start (found with strace in testing) and logs the values it read as `Current Preference Settings`. The client saves the last gateway address (`DefaultHostName`) there when it connects, and the preferences that the user changes in the window (observed in testing). When the file does not exist, the container creates it with "Allow local (LAN) access" turned on, so that the window shows the setting that the [client profile](#how-is-allow-local-lan-access-turned-on-and-what-if-the-gateway-does-not-allow-it) turns on. The client uses its defaults for every other preference:
 
   ```xml
   <?xml version="1.0" encoding="UTF-8"?>
@@ -191,6 +192,7 @@ The directory holds:
   ```
 
   The container never changes or replaces an existing file. To go back to this default, delete the file while the container is stopped.
+- `.local/shareacwebhelper.cookies.sqlite` and `.local/shareacwebhelper/`: the cookies and the cache of the login window (observed in testing; the client names them without a `/` after `share`).
 - `.vnc/passwd`: the VNC password, owned by `vpnuser` with mode 600.
 - Anything else that the Cisco client and its login window save in the home directory.
 
@@ -256,13 +258,34 @@ On a desktop, the display manager writes this record. The container has no displ
 
 The login window uses WebKitGTK. The container cannot create user namespaces, so WebKit's sandbox cannot be created, and the VNC display has no GPU. `vpnui` therefore runs with `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1` and `WEBKIT_DISABLE_COMPOSITING_MODE=1` (observed in testing). Pages in the login window run without WebKit's sandbox, so use the window only for the gateway's login.
 
-### Why is "Allow local (LAN) access" on by default, and what if the gateway does not allow it?
+### How is "Allow local (LAN) access" turned on, and what if the gateway does not allow it?
 
-Once the VPN is connected, the Cisco client's firewall chains drop new connections from the local network (observed in testing). For the container, the local network is the Docker network that the host connects from. Without local LAN access, the host could no longer reach noVNC or the proxies.
+Once the VPN is connected, the Cisco client's firewall chains drop new connections from the local network (observed in testing). For the container, the local network is the Docker network that the host connects from. Without local LAN access, the host can no longer reach noVNC or the proxies.
 
-Cisco's "Allow local (LAN) access when using VPN" preference lets the local network through, when the gateway allows local LAN access as well ([Cisco documentation](https://www.cisco.com/c/en/us/support/docs/security/secure-client-5/221024-configure-local-lan-access-for-secure-cl.html)). When the gateway allows it, the connection log shows `IPv4 Local LAN Wildcard: received` (observed in testing). The container turns the preference on in the default preference file (see [Persistence](#persistence)). It is a user preference in the Cisco window's preferences (the gear icon), and an existing preference file is kept as it is.
+Cisco's "Allow local (LAN) access when using VPN" setting lets the local network through when the gateway allows local LAN access as well. [Cisco's documentation](https://www.cisco.com/c/en/us/support/docs/security/secure-client-5/221024-configure-local-lan-access-for-secure-cl.html) turns it on in the client profile. When `VPN_SERVER` is set, the container writes such a profile at each start, as `/opt/cisco/secureclient/vpn/profile/cisco-vpn-docker.xml`:
 
-With the preference turned off, the VPN connected, and then the host's new connections to the container were dropped (observed in testing). The proxies and a newly opened noVNC page could not be reached until the VPN session ended. A gateway that does not allow local LAN access was not tested, and what happens then depends on the gateway's policy. If the host cannot reach noVNC or the proxies after the VPN connects, look for `IPv4 Local LAN Wildcard: received` in `docker logs cisco-vpn`. That line was logged in testing when the gateway allowed local LAN access. `docker exec` does not go through the network, so it still works:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<AnyConnectProfile xmlns="http://schemas.xmlsoap.org/encoding/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://schemas.xmlsoap.org/encoding/ AnyConnectProfile.xsd">
+  <ClientInitialization>
+    <LocalLanAccess UserControllable="true">true</LocalLanAccess>
+  </ClientInitialization>
+  <ServerList>
+    <HostEntry>
+      <HostName>vpn.example.com</HostName>
+      <HostAddress>vpn.example.com</HostAddress>
+    </HostEntry>
+  </ServerList>
+</AnyConnectProfile>
+```
+
+- The VPN daemon `vpnagentd` takes the setting at connect time from the profile whose server list holds the gateway. Its log then shows `loading preferences for profile 'cisco-vpn-docker.xml'`, and the connection log shows `IPv4 Local LAN Wildcard: received` when the gateway allows local LAN access. With the profile, the host reached noVNC, the proxies and the routed addresses while the VPN was connected (observed in testing). Connect to the address exactly as given in `VPN_SERVER`, so that the profile applies.
+- The user preference file `~/.vpn/.anyconnect`, which the container creates with the setting turned on (see [Persistence](#persistence)), is not enough by itself. The Cisco window reads it, but `vpnagentd` does not, and the connection log showed `IPv4 Local LAN Wildcard: local LAN access preference is disabled` (observed in testing). The file is still created, because before a connection the window does not take the setting from the profile: with the profile and no preference file, the window read `LocalLanAccess: false` (observed in testing). Local LAN access worked in testing with both the profile and that file.
+- `UserControllable="true"` keeps the checkbox in the Cisco window's preferences (the gear icon). A value that the user saves there goes to `~/.vpn/.anyconnect`.
+- Without `VPN_SERVER` the container writes no profile and logs a warning. Turning the checkbox on in the Cisco window also turned local LAN access on in testing.
+- The profile is in the image's file system, not in the data directory, so each new container writes it again from `VPN_SERVER`.
+
+A gateway that does not allow local LAN access was not tested, and what happens then depends on the gateway's policy. If the host cannot reach noVNC or the proxies after the VPN connects, look for `IPv4 Local LAN Wildcard` in `docker logs cisco-vpn`. `received` was logged in testing when local LAN access worked. `local LAN access preference is disabled` means that the client did not ask for it, for example because `VPN_SERVER` is not set or differs from the address that was entered. `docker exec` does not go through the network, so it still works:
 
 ```bash
 docker exec cisco-vpn /opt/cisco/secureclient/bin/vpn state

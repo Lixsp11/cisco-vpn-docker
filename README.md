@@ -29,10 +29,11 @@ The container needs the `NET_ADMIN` and `SYS_ADMIN` capabilities and `/dev/net/t
 
 1. Put the package in `packages/`. The Dockerfile expects `cisco-secure-client-vpn_5.1.20.333_amd64.deb`; for another file name, see [Build](doc/usage.md#build).
 
-2. Set the VNC password in a `.env` file next to `docker-compose.yml`. Only the first 8 characters count:
+2. Set the VNC password and the address of your VPN gateway in a `.env` file next to `docker-compose.yml`. Only the first 8 characters of the password count. With `VPN_SERVER` set, the container turns on Cisco's "Allow local (LAN) access" for that gateway, so that the host can still reach noVNC and the proxies once the VPN is connected (see the [FAQ](doc/usage.md#how-is-allow-local-lan-access-turned-on-and-what-if-the-gateway-does-not-allow-it)):
 
    ```
    PASSWORD=changeme
+   VPN_SERVER=vpn.example.com
    ```
 
 3. Build and start. `[start] all services started` in the log means that startup has finished; the lines of each service show whether it runs or failed:
@@ -50,7 +51,7 @@ The container needs the `NET_ADMIN` and `SYS_ADMIN` capabilities and `/dev/net/t
 
 5. Open `http://127.0.0.1:6080/vnc.html` and enter the VNC password.
 
-6. In the Cisco window, enter the VPN address (for example `vpn.example.com`), click Connect and complete the login.
+6. In the Cisco window, enter the VPN address exactly as in `VPN_SERVER`, click Connect and complete the login.
 
 7. Use the proxies:
 
