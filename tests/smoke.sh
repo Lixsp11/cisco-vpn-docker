@@ -40,7 +40,8 @@ run_checks() {
     check "vpnagentd runs as root" in_c sh -c '[ "$(ps -o user= -C vpnagentd | head -1)" = root ]'
     check "vpnui runs as vpnuser" in_c sh -c '[ "$(ps -o user= -C vpnui | head -1)" = vpnuser ]'
     check "utmp record points to an ancestor of vpnui" in_c sh -c "$utmp_check"
-    check "HTTP proxy works" curl -fsS -o /dev/null -x http://127.0.0.1:8888 https://deb.debian.org/
+    # --noproxy '' keeps a NO_PROXY setting on the host from sending the request around the proxy
+    check "HTTP proxy works" curl -fsS -o /dev/null --noproxy '' -x http://127.0.0.1:8888 https://deb.debian.org/
     check "only NET_ADMIN and SYS_ADMIN are added" sh -c '[ "$(docker inspect -f "{{.HostConfig.CapAdd}}" cisco-vpn)" = "[CAP_NET_ADMIN CAP_SYS_ADMIN]" ]'
 }
 
