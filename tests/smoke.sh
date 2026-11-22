@@ -2,11 +2,13 @@
 # Smoke tests that need no VPN login. Run on the Docker host after `docker compose up -d --build`.
 # Waits until the container is ready and runs every check. Stops danted twice, the second time while a tunnel
 # interface of another address exists, and checks the SOCKS5 proxy after run_service restarts it. Puts a rule
-# before the firewall's rules in INPUT and in FORWARD, as the VPN client may do when it connects, checks that the
-# firewall moves its rules back to the top and keeps the other rule, and removes that rule again. Restarts the
+# before the firewall's rules in INPUT and in FORWARD, as the VPN client may do when it connects, and replaces the
+# firewall's DROP rule with an unmarked copy at the end of INPUT; checks that the firewall puts its rules back at
+# the top and leaves the other rules in their order, and removes those rules again. Restarts the
 # container, waits again and runs every check once more, then restarts it once more while giving the temporary
 # tunnel interface its address fails. Then recreates the container on an empty data directory of its own under
-# the repository's tmp/ and runs every check there. On that directory it restarts the container while iptables
+# the repository's tmp/ and runs every check there. On that directory it makes iptables fail while
+# iptables-restore works and checks that the firewall changes nothing. It restarts the container while iptables
 # and iptables-restore fail and checks that it stops before it starts the VPN client. It recreates the container
 # with SOCKS_USER and SOCKS_PASSWD set and restarts it, recreates it with only SOCKS_USER set, with a SOCKS_PASSWD
 # that cannot be set (and restarts it with an account of the proxy's left from an earlier start), with
@@ -317,23 +319,53 @@ ip_forward_is_set() {
     return 1
 }
 
-# Succeed when each of the firewall's rules appears exactly once in the container's filter and nat tables.
-# iptables -S may print the conntrack states in either order.
+# The firewall's rules as iptables -S prints them, as extended regular expressions that match a whole rule.
+# The firewall marks its rules with a comment, and iptables may print the conntrack states in either order.
+fw_mark='-m comment --comment cisco-vpn-docker'
+fw_states='(RELATED,ESTABLISHED|ESTABLISHED,RELATED)'
+fw_input_rules=(
+    "-A INPUT -m conntrack --ctstate $fw_states $fw_mark -j ACCEPT"
+    "-A INPUT -i cscotun0 -p tcp $fw_mark -j DROP"
+)
+fw_forward_rules=(
+    "-A FORWARD -i eth0 -o cscotun0 $fw_mark -j ACCEPT"
+    "-A FORWARD -i cscotun0 -o eth0 -m conntrack --ctstate $fw_states $fw_mark -j ACCEPT"
+)
+fw_postrouting_rules=(
+    "-A POSTROUTING -o cscotun0 $fw_mark -j MASQUERADE"
+)
+
+# Succeed when the first rules of chain $2 in table $1 in the container match the expressions $3..., in this order
+chain_starts_with() {
+    local table=$1 chain=$2 output rules rule i=0
+    shift 2
+    output=$(in_c iptables -t "$table" -S "$chain") || return 1
+    mapfile -t rules < <(grep -- '^-A ' <<<"$output" | head -n "$#")
+    for rule; do
+        if ! grep -qxE -- "$rule" <<<"${rules[i]}"; then
+            echo "rule $((i + 1)) of $chain is '${rules[i]}', expected one that matches '$rule'"
+            return 1
+        fi
+        i=$((i + 1))
+    done
+}
+
+# Succeed when each of the firewall's rules appears exactly once in the container's filter and nat tables,
+# and no other rule has the firewall's mark
 firewall_rules_are_unique() {
     local rules rule count
     rules=$(in_c sh -c 'iptables -S && iptables -t nat -S') || return 1
-    for rule in \
-        '-A INPUT -m conntrack --ctstate (RELATED,ESTABLISHED|ESTABLISHED,RELATED) -j ACCEPT' \
-        '-A INPUT -i cscotun0 -p tcp -j DROP' \
-        '-A FORWARD -i eth0 -o cscotun0 -j ACCEPT' \
-        '-A FORWARD -i cscotun0 -o eth0 -m conntrack --ctstate (RELATED,ESTABLISHED|ESTABLISHED,RELATED) -j ACCEPT' \
-        '-A POSTROUTING -o cscotun0 -j MASQUERADE'; do
+    for rule in "${fw_input_rules[@]}" "${fw_forward_rules[@]}" "${fw_postrouting_rules[@]}"; do
         count=$(grep -cxE -- "$rule" <<<"$rules")
         if [ "$count" != 1 ]; then
             echo "'$rule' appears $count times"
             return 1
         fi
     done
+    count=$(grep -cF -- " $fw_mark " <<<"$rules")
+    [ "$count" = 5 ] && return 0
+    echo "$count rules have the firewall's mark, expected 5"
+    return 1
 }
 
 # Succeed when the firewall logged, since the time $1, exactly one line that it put its rules first in INPUT and
@@ -343,6 +375,37 @@ firewall_repaired_input_and_forward_once() {
     lines=$(docker logs --since "$1" cisco-vpn 2>&1 | grep '^\[firewall\]' | sort)
     expected=$(printf '[firewall] put the rules first in the %s chain of the filter table\n' FORWARD INPUT)
     [ "$lines" = "$expected" ] && return 0
+    echo "firewall lines since $1:"
+    printf '%s\n' "$lines"
+    return 1
+}
+
+# Print the rules of chain $1 in the container's filter table that do not have the firewall's mark
+unmarked_rules() {
+    local rules
+    rules=$(in_c iptables -S "$1") || return 1
+    grep -- '^-A ' <<<"$rules" | grep -vF -- " $fw_mark "
+    return 0
+}
+
+# Succeed when the rules of the container's INPUT and FORWARD that do not have the firewall's mark are $1 and $2,
+# one rule per line, in this order
+unmarked_rules_are() {
+    local input forward
+    input=$(unmarked_rules INPUT) && forward=$(unmarked_rules FORWARD) || return 1
+    [ "$input" = "$1" ] && [ "$forward" = "$2" ] && return 0
+    printf 'unmarked rules of INPUT:\n%s\nunmarked rules of FORWARD:\n%s\n' "$input" "$forward"
+    return 1
+}
+
+# Succeed when the firewall logged, since the time $1, exactly one line that it cannot put its rules first, and no repair
+firewall_logged_one_failure() {
+    local lines
+    lines=$(docker logs --since "$1" cisco-vpn 2>&1 | grep '^\[firewall\]')
+    if [ "$(grep -c '^\[firewall\] error: cannot put the rules first' <<<"$lines")" = 1 ] &&
+        ! grep -q '^\[firewall\] put the rules first' <<<"$lines"; then
+        return 0
+    fi
     echo "firewall lines since $1:"
     printf '%s\n' "$lines"
     return 1
@@ -386,9 +449,9 @@ run_checks() {
 run_firewall_checks() {
     check "container forwards IPv4 packets" in_c sh -c '[ "$(sysctl -n net.ipv4.ip_forward)" = 1 ]'
     check "container is created with net.ipv4.ip_forward=1" ip_forward_is_set
-    check "INPUT starts with the firewall's two rules" in_c sh -c 'iptables -S INPUT | sed -n 2,3p | tr "\n" " " | grep -qE -- "(RELATED,ESTABLISHED|ESTABLISHED,RELATED) -j ACCEPT.*-i cscotun0 -p tcp -j DROP"'
-    check "FORWARD starts with the firewall's two rules" in_c sh -c 'iptables -S FORWARD | sed -n 2,3p | tr "\n" " " | grep -q -- "-i eth0 -o cscotun0 -j ACCEPT.*-i cscotun0 -o eth0"'
-    check "traffic out of the tunnel is masqueraded" in_c sh -c 'iptables -t nat -S POSTROUTING | grep -q -- "-o cscotun0 -j MASQUERADE"'
+    check "INPUT starts with the firewall's two rules" chain_starts_with filter INPUT "${fw_input_rules[@]}"
+    check "FORWARD starts with the firewall's two rules" chain_starts_with filter FORWARD "${fw_forward_rules[@]}"
+    check "POSTROUTING starts with masquerading out of the tunnel" chain_starts_with nat POSTROUTING "${fw_postrouting_rules[@]}"
     check "each firewall rule appears once" firewall_rules_are_unique
 }
 
@@ -414,11 +477,17 @@ echo "--- after a rule is put before the firewall's rules ---"
 inserted_at=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
 check "a rule is inserted at the top of INPUT" in_c iptables -I INPUT 1 -j RETURN
 check "a rule is inserted at the top of FORWARD" in_c iptables -I FORWARD 1 -j RETURN
+# Another owner's rule that is identical to the firewall's DROP rule apart from the mark is not the firewall's
+check "the firewall's DROP rule is replaced by an unmarked copy at the end of INPUT" in_c sh -c \
+    "iptables -D INPUT -i cscotun0 -p tcp $fw_mark -j DROP && iptables -A INPUT -i cscotun0 -p tcp -j DROP"
 sleep 12
 run_firewall_checks
-check "inserted rules are kept" in_c sh -c 'iptables -S INPUT | grep -qx -- "-A INPUT -j RETURN" && iptables -S FORWARD | grep -qx -- "-A FORWARD -j RETURN"'
+check "other rules keep their order" unmarked_rules_are $'-A INPUT -j RETURN\n-A INPUT -i cscotun0 -p tcp -j DROP' \
+    "-A FORWARD -j RETURN"
 check "firewall logged one repair of INPUT and one of FORWARD" firewall_repaired_input_and_forward_once "$inserted_at"
-check "inserted rules are removed" in_c sh -c 'iptables -D INPUT -j RETURN && iptables -D FORWARD -j RETURN && ! iptables -S | grep -q -- "-j RETURN"'
+check "inserted rules are removed" in_c sh -c \
+    'iptables -D INPUT -j RETURN && iptables -D INPUT -i cscotun0 -p tcp -j DROP && iptables -D FORWARD -j RETURN'
+check "only the firewall's rules are left in INPUT and FORWARD" unmarked_rules_are "" ""
 
 echo "--- after docker restart ---"
 check "container restarts" docker restart cisco-vpn
@@ -452,6 +521,17 @@ check "default preferences are in the test data directory" test -f "$test_data/$
 check "VNC password file holds the default password" vnc_passwd_holds password
 check "default VNC password warning is logged" wait_log '^\[start\] warning: PASSWORD is not set'
 check "VNC accepts the default password" vnc_accepts password
+
+# A chain that the firewall cannot read is not an empty chain: it must change nothing, although iptables-restore
+# would work. The watch checks the rules at least once in 6 seconds.
+echo "--- while iptables fails and iptables-restore works ---"
+failing_from=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
+check "failing iptables is installed" install_failing_command iptables
+check "firewall.sh apply fails" sh -c '! docker exec -e VPN_TUN=cscotun0 cisco-vpn firewall.sh apply'
+sleep 6
+check "failing iptables is removed" in_c rm /usr/local/sbin/iptables
+run_firewall_checks
+check "firewall logged one failure and no repair" firewall_logged_one_failure "$failing_from"
 
 # Without its firewall rules the container would accept connections from the VPN side, so it must stop instead.
 # The restart makes start.sh find the failing commands first in PATH; the recreate of the next section removes them.
