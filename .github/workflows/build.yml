@@ -18,6 +18,18 @@ jobs:
       run:
         shell: bash
     steps:
+      # A package that a workflow creates on ghcr.io inherits the repository's visibility, so the build
+      # runs only in a private repository. Values missing from the event payload count as not private.
+      - name: Require a private repository
+        env:
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          if [ "$REPOSITORY_PRIVATE" != true ] || [ "$REPOSITORY_VISIBILITY" != private ]; then
+            echo "::error::This workflow runs only in a private repository; the event reports private '$REPOSITORY_PRIVATE', visibility '$REPOSITORY_VISIBILITY'"
+            exit 1
+          fi
+
       - uses: actions/checkout@v7
 
       - name: Download and check the Cisco package
