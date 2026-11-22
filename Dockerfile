@@ -27,7 +27,7 @@ RUN useradd -m -s /bin/bash vpnuser
 
 COPY docker-root/ /
 # The executable bit may be lost when copying files around; set it explicitly
-RUN chmod 755 /usr/local/bin/start.sh /usr/local/bin/diag.sh
+RUN chmod 755 /usr/local/bin/start.sh /usr/local/bin/vpn-cisco.sh /usr/local/bin/diag.sh
 
 # Send vpnagentd and vpnui logs to stdout so they show up in docker logs
 ENV CSC_LOGGING_OUTPUT=STDOUT
