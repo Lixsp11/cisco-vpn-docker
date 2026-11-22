@@ -17,8 +17,8 @@
 # container's own address and a web server that the checks start in it (and restarts it, then stops it while a
 # keepalive request waits for a server that never answers), with PING_INTERVAL empty and with a PING_INTERVAL of
 # 0. It recreates it with VPN_SERVER set, checks the client profile and restarts it, and with a VPN_SERVER that
-# is not a host name. Then it checks the persistent home directory: it writes a preference file of the user's
-# and recreates the container again, recreates it with PASSWORD and VNC_SIZE set, once more with both empty and once with a PASSWORD of two lines, once with
+# is not a host name. Then it checks the persistent home directory: it replaces the default preference file
+# with one of the user's and recreates the container again, recreates it with PASSWORD and VNC_SIZE set, once more with both empty and once with a PASSWORD of two lines, once with
 # another PASSWORD that cannot be written because the VNC password's directory is read-only, and finally
 # recreates it on the configured data directory.
 # The test data directory and the copies of the files compared across a recreate are removed before the
@@ -572,6 +572,7 @@ run_checks() {
     check "HTTP proxy works" curl -fsS -o /dev/null --noproxy '' -x http://127.0.0.1:8888 https://deb.debian.org/
     check "only NET_ADMIN and SYS_ADMIN are added" sh -c '[ "$(docker inspect -f "{{.HostConfig.CapAdd}}" cisco-vpn)" = "[CAP_NET_ADMIN CAP_SYS_ADMIN]" ]'
     check "vpnui logged its preferences" wait_prefs_logged
+    check "preferences allow local LAN access by default" local_lan_access_is true
     check "vpnuser can write its home" in_c setpriv --reuid=vpnuser --regid=vpnuser --init-groups \
         sh -c 'touch /home/vpnuser/.write-test && rm /home/vpnuser/.write-test'
     check "default VNC size is 1280x720" vnc_size_is 1280x720
@@ -642,9 +643,9 @@ check "container is recreated on the test data directory" recreate CISCO_VPN_DAT
 check "services started after recreate" wait_ready
 run_checks
 run_socks5_checks
+check "default preferences are in the test data directory" test -f "$test_data/$prefs"
 check "no client profile is written without VPN_SERVER" profile_dir_holds "$profile_dir_without_profile"
 check "missing VPN_SERVER warning is logged" wait_log '^\[start\] warning: VPN_SERVER is not set'
-check "vpnui reads LocalLanAccess: false without a profile" local_lan_access_is false
 check "VNC password file holds the default password" vnc_passwd_holds password
 check "default VNC password warning is logged" wait_log '^\[start\] warning: PASSWORD is not set'
 check "VNC accepts the default password" vnc_accepts password
@@ -781,7 +782,7 @@ check "services started after recreate" wait_ready
 check "refused PING_INTERVAL is logged" wait_log '^\[start\] error: PING_INTERVAL is not a whole number of seconds above 0'
 check "keepalive does not run" keepalive_is_off
 
-# The profile turns on local LAN access for the gateway VPN_SERVER, and vpnui reads the setting from it.
+# The profile turns on local LAN access for the gateway VPN_SERVER, and both client processes load it.
 # docker restart keeps the container's files, so the restart replaces the profile of the first start.
 echo "--- with VPN_SERVER set ---"
 check "container is recreated with VPN_SERVER=$test_server" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
@@ -791,8 +792,6 @@ check "client profile lists VPN_SERVER and turns on local LAN access" profile_li
 check "profile directory holds only the schema and the client profile" profile_dir_holds "$profile_dir_with_profile"
 check "vpnagentd loaded the client profile" wait_log 'csc_vpnagent\[[0-9]+\]: .*Loaded profiles: .*/cisco-vpn-docker\.xml'
 check "vpnui loaded the client profile" wait_log 'csc_ui\[[0-9]+\]: .*Loaded profiles: .*/cisco-vpn-docker\.xml'
-check "vpnui logged its preferences" wait_prefs_logged
-check "vpnui reads LocalLanAccess: true from the profile" local_lan_access_is true
 check "nothing is logged about VPN_SERVER" nothing_logged_about_vpn_server
 check "container restarts" docker restart cisco-vpn
 check "services started after restart" wait_ready
@@ -808,17 +807,18 @@ check "services started after recreate" wait_ready
 check "refused VPN_SERVER is logged" wait_log '^\[start\] error: VPN_SERVER is not a host name or an IP address'
 check "no client profile is written for an invalid VPN_SERVER" profile_dir_holds "$profile_dir_without_profile"
 
-# A preference file of the user's is kept as a whole, and its choice wins over the profile's: the file turns
-# LocalLanAccess off and names a gateway, and it is compared byte for byte after a recreate with VPN_SERVER set
+# A preference file that already exists holds the user's choices and must be kept as a whole: the file that
+# replaces the default one turns LocalLanAccess off and names a gateway, and it is compared byte for byte after
+# a recreate with VPN_SERVER set
 echo "--- with a preference file of the user's ---"
-check "preference file with LocalLanAccess false and a gateway is written" write_user_prefs
+check "default preference file is replaced by one with LocalLanAccess false and a gateway" write_user_prefs
 check "preference file is copied for comparison" cp "$test_data/$prefs" "$edited_prefs"
 check "container is recreated with VPN_SERVER" recreate CISCO_VPN_DATA="$test_data" VPN_SERVER="$test_server"
 check "services started after recreate" wait_ready
 # cmp fails when either file is missing
 check "preference file is unchanged" cmp "$edited_prefs" "$test_data/$prefs"
 check "vpnui logged its preferences" wait_prefs_logged
-check "vpnui reads the user's LocalLanAccess: false over the profile's" local_lan_access_is false
+check "vpnui reads the user's LocalLanAccess: false" local_lan_access_is false
 
 # A passwd.new left next to the password file must not decide the new file's mode
 echo "--- with PASSWORD and VNC_SIZE set ---"

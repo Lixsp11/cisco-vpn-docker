@@ -3,13 +3,32 @@
 #   VPN_TUN      the tunnel interface of the client
 #   vpn_prepare  preparation before any service starts
 #   vpn_start    starts the client processes with start.sh's run_service
-# Uses log, run_service, VPN_USER and DISPLAY from start.sh, and VPN_SERVER from the environment.
+# Uses log, run_service, VPN_USER and DISPLAY from start.sh, and VPN_SERVER from the environment; vpn_prepare runs
+# after start.sh has given the home directory to VPN_USER.
 
 # Tunnel interface that the Cisco client creates when it connects; start.sh uses it
 # shellcheck disable=SC2034
 VPN_TUN=cscotun0
 
 CSC_BIN=/opt/cisco/secureclient/bin
+
+# Give the GUI user default preferences when it has no preference file yet; an existing file holds
+# the user's own choices and is left alone. vpnui reads its preferences from ~/.vpn/.anyconnect
+# (found with strace) and logs the values it read as "Current Preference Settings".
+# The default turns on "Allow local (LAN) access" so that the Cisco window shows the setting that the client
+# profile of write_profile applies at connect time. vpnagentd does not read this file, so it does not turn local
+# LAN access on by itself; and before a connection, vpnui does not take the setting from the profile: with the
+# profile and no preference file, vpnui reads LocalLanAccess: false (observed in testing). The client rewrites
+# this file when it connects, keeping its preferences (observed in testing).
+# The copy runs as the GUI user, so what it creates is the user's, and links inside the volume can only
+# lead it where that user may write anyway. cp -n creates the file exclusively and never replaces one.
+# The home directory must already belong to the GUI user (start.sh's prepare_home).
+seed_preferences() {
+    # The single-quoted script is expanded by the sh that runs it
+    # shellcheck disable=SC2016
+    setpriv --reuid="$VPN_USER" --regid="$VPN_USER" --init-groups \
+        sh -c 'mkdir -p "$1" && cp -n /etc/skel-vpnuser/.vpn/.anyconnect "$1/.anyconnect"' sh "/home/$VPN_USER/.vpn"
+}
 
 # Client profile that write_profile writes; the client loads every profile in this directory
 CSC_PROFILE=/opt/cisco/secureclient/vpn/profile/cisco-vpn-docker.xml
@@ -19,7 +38,7 @@ CSC_PROFILE=/opt/cisco/secureclient/vpn/profile/cisco-vpn-docker.xml
 # connections from the local network. vpnagentd takes this setting at connect time from the profile whose server
 # list holds the gateway, or from the Cisco window when the user changes the checkbox there; it does not read the
 # GUI user's preference file ~/.vpn/.anyconnect. Observed in testing: with only that file set, the connection log
-# shows "IPv4 Local LAN Wildcard: local LAN access preference is disabled", and with this profile
+# shows "IPv4 Local LAN Wildcard: local LAN access preference is disabled", and with this profile and that file
 # "IPv4 Local LAN Wildcard: received". The profile setting is Cisco's own way to turn local LAN access on:
 # https://www.cisco.com/c/en/us/support/docs/security/secure-client-5/221024-configure-local-lan-access-for-secure-cl.html
 # The gateway must allow local LAN access as well. UserControllable keeps the checkbox in the Cisco window, so
@@ -80,6 +99,7 @@ vpn_prepare() {
         fi
     done
 
+    seed_preferences
     write_profile
 }
 
