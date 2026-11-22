@@ -6,8 +6,8 @@ ARG CSC_DEB=cisco-secure-client-vpn_5.1.20.333_amd64.deb
 
 COPY packages/${CSC_DEB} /tmp/${CSC_DEB}
 
-# Install VNC, noVNC, WebKit for the login window, diagnostic tools and proxies first,
-# then the Cisco package (apt resolves its Depends).
+# Install VNC, noVNC, WebKit for the login window, diagnostic tools, proxies and busybox (ping and wget
+# for the keepalive) first, then the Cisco package (apt resolves its Depends).
 # Versions are not pinned: the Debian archive keeps only the current version of each package,
 # so pins would break the build after the next point release or security update.
 # hadolint ignore=DL3008
@@ -18,6 +18,7 @@ RUN apt-get update \
       libwebkit2gtk-4.1-0 dbus-x11 xdg-utils fonts-wqy-microhei ca-certificates \
       iproute2 iptables procps psmisc \
       dante-server tinyproxy-bin \
+      busybox \
  && apt-get install -y --no-install-recommends /tmp/${CSC_DEB} \
  && rm -f /tmp/${CSC_DEB} \
  && rm -rf /var/lib/apt/lists/*

@@ -23,6 +23,11 @@ services:
       SOCKS_USER: ${SOCKS_USER:-}
       SOCKS_PASSWD: ${SOCKS_PASSWD:-}
       NODANTED: ${NODANTED:-}
+      # Keepalive, so that the VPN connection is not dropped as idle: every PING_INTERVAL seconds, ping the address
+      # PING_ADDR and request the URL PING_ADDR_URL, each only when set. The default interval is in start.sh.
+      PING_ADDR: ${PING_ADDR:-}
+      PING_ADDR_URL: ${PING_ADDR_URL:-}
+      PING_INTERVAL: ${PING_INTERVAL:-}
     ports:
       - "127.0.0.1:6080:6080"   # noVNC
       - "127.0.0.1:1080:1080"   # SOCKS5

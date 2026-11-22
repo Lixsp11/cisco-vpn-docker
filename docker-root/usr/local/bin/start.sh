@@ -1,6 +1,6 @@
 #!/bin/bash
-# Container entrypoint: starts VNC, noVNC, the firewall, the VPN client, the SOCKS5 and HTTP proxies,
-# and keeps them running. Each service's output is prefixed with [service] in docker logs.
+# Container entrypoint: starts VNC, noVNC, the firewall, the VPN client, the SOCKS5 and HTTP proxies and the
+# keepalive, and keeps them running. Each service's output is prefixed with [service] in docker logs.
 
 # Unprivileged user that runs the VPN client's GUI, created in the Dockerfile.
 # Its home directory is the volume that keeps the client's settings.
@@ -172,6 +172,46 @@ run_danted() {
     wait "$pid"
 }
 
+# Seconds between two keepalive checks when PING_INTERVAL is empty
+DEFAULT_PING_INTERVAL=1800
+
+# Start the keepalive, which keeps the VPN connection from being dropped as idle: every PING_INTERVAL seconds it
+# pings PING_ADDR and requests the URL PING_ADDR_URL, each only when set, and logs only the checks that fail.
+# A PING_INTERVAL that is not a whole number of seconds above 0 starts neither check: with such an interval,
+# sleep would either fail at once, and run_service would restart the check every second, or not wait at all.
+start_keepalive() {
+    local interval=${PING_INTERVAL:-$DEFAULT_PING_INTERVAL}
+    [ -n "$PING_ADDR" ] || [ -n "$PING_ADDR_URL" ] || return 0
+    if ! [[ $interval =~ ^[0-9]+$ && $interval =~ [1-9] ]]; then
+        log "error: PING_INTERVAL is not a whole number of seconds above 0; the keepalive is not started"
+        return 1
+    fi
+    if [ -n "$PING_ADDR" ]; then
+        run_service keepalive keep_pinging "$interval" "$PING_ADDR"
+    fi
+    if [ -n "$PING_ADDR_URL" ]; then
+        run_service keepalive keep_pinging_url "$interval" "$PING_ADDR_URL"
+    fi
+}
+
+# Every $1 seconds, ping the address $2 once, as docker-easyconnect's keep_pinging does, and log when it does not
+# answer within 1 second
+keep_pinging() {
+    while sleep "$1"; do
+        busybox ping -c1 -W1 -w1 "$2" >/dev/null 2>&1 || echo "$2 unreachable"
+    done
+}
+
+# Every $1 seconds, request the URL $2 without downloading it, as docker-easyconnect's keep_pinging_url does for
+# servers that do not answer pings, and log when the request fails or takes more than 10 seconds.
+# Both outputs of timeout go to /dev/null: timeout runs in a process group of its own, which the kill in stop_all
+# does not reach, so a request in progress must not keep the log pipe open while the container stops.
+keep_pinging_url() {
+    while sleep "$1"; do
+        timeout 10 busybox wget -q --spider "$2" >/dev/null 2>&1 || echo "$2 unreachable"
+    done
+}
+
 # Firewall, before any service starts; the watch then keeps its rules first in their chains.
 # Without the rules the VPN side could open connections to the container's services, so the container stops
 # when they cannot be put in place.
@@ -219,6 +259,8 @@ fi
 
 # HTTP proxy
 run_service http tinyproxy -d -c /etc/tinyproxy.conf
+
+start_keepalive
 
 log "all services started"
 wait
