@@ -4,7 +4,8 @@
 # and runs every check once more. Then checks the persistent home directory: it recreates the container
 # on an empty data directory of its own under the repository's tmp/, changes a preference there and
 # recreates the container again, and finally recreates it on the configured data directory.
-# The test data directory is removed at the start of these checks and left in place afterwards.
+# The test data directory and the copy of the edited preference file are removed at the start of these
+# checks and left in place afterwards.
 # Exits 0 when every check passes, 1 otherwise.
 
 # lib.sh is linted on its own
@@ -15,6 +16,8 @@ repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd) || exit 1
 # Data directory used by the persistence checks instead of the configured one, which they never modify
 test_data=$repo/tmp/smoke-data
 prefs=.vpn/.anyconnect
+# Copy of the preference file as edited by the checks, compared with the file after a recreate
+edited_prefs=$repo/tmp/smoke-prefs-edited
 
 # start.sh writes a utmp USER_PROCESS record so that vpnagentd can find the user running vpnui.
 # The record must have user vpnuser, line :1, and a PID on vpnui's parent chain below PID 1.
@@ -88,18 +91,22 @@ run_checks
 
 # Docker creates a missing data directory as root
 echo "--- on an empty data directory ---"
-check "test data directory is removed" rm -rf "$test_data"
+check "test data directory is removed" rm -rf "$test_data" "$edited_prefs"
 check "container is recreated on the test data directory" recreate CISCO_VPN_DATA="$test_data"
 check "services started after recreate" wait_ready
 run_checks
 check "default preferences are in the test data directory" test -f "$test_data/$prefs"
 
-# A preference file that already exists holds the user's choices and must be kept
+# A preference file that already exists holds the user's choices and must be kept as a whole:
+# the edit turns LocalLanAccess off and adds a gateway address, and the file is compared byte for byte
 echo "--- with a preference changed by the user ---"
-check "LocalLanAccess is changed to false" in_c setpriv --reuid=vpnuser --regid=vpnuser --init-groups \
-    sh -c "sed -i 's#<LocalLanAccess>true</LocalLanAccess>#<LocalLanAccess>false</LocalLanAccess>#' /home/vpnuser/$prefs && grep -q '<LocalLanAccess>false</LocalLanAccess>' /home/vpnuser/$prefs"
+check "LocalLanAccess is changed to false and a gateway is added" in_c setpriv --reuid=vpnuser --regid=vpnuser --init-groups \
+    sh -c "sed -i -e 's#<LocalLanAccess>true</LocalLanAccess>#<LocalLanAccess>false</LocalLanAccess>#' -e 's#^<ControllablePreferences>#<DefaultHostName>vpn.example.com</DefaultHostName>\n&#' /home/vpnuser/$prefs && grep -q '<LocalLanAccess>false</LocalLanAccess>' /home/vpnuser/$prefs && grep -q '<DefaultHostName>vpn.example.com</DefaultHostName>' /home/vpnuser/$prefs"
+check "edited preference file is copied for comparison" cp "$test_data/$prefs" "$edited_prefs"
 check "container is recreated on the test data directory" recreate CISCO_VPN_DATA="$test_data"
 check "services started after recreate" wait_ready
+# cmp fails when either file is missing
+check "edited preference file is unchanged" cmp "$edited_prefs" "$test_data/$prefs"
 check "changed preference is kept in the file" grep -q '<LocalLanAccess>false</LocalLanAccess>' "$test_data/$prefs"
 check "vpnui logged its preferences" wait_prefs_logged
 check "vpnui reads the changed preference" local_lan_access_is false
