@@ -3,7 +3,8 @@
 # Waits until the container is ready, runs every check, restarts the container, waits again
 # and runs every check once more. Then checks the persistent home directory: it recreates the container
 # on an empty data directory of its own under the repository's tmp/, changes a preference there and
-# recreates the container again, recreates it with PASSWORD and VNC_SIZE set and once more with both empty,
+# recreates the container again, recreates it with PASSWORD and VNC_SIZE set, once more with both empty and
+# once with a PASSWORD of two lines, restarts it with a link named passwd.new next to the VNC password file,
 # and finally recreates it on the configured data directory.
 # The test data directory and the copies of the files compared across a recreate are removed at the start
 # of these checks and left in place afterwards.
@@ -22,8 +23,12 @@ edited_prefs=$repo/tmp/smoke-prefs-edited
 vnc_passwd=.vnc/passwd
 # Copy of the VNC password file written for PASSWORD, compared with the file after a recreate without PASSWORD
 saved_vnc_passwd=$repo/tmp/smoke-vnc-passwd
-# VNC uses only the first 8 characters of a password; this one is longer and has a space and special characters
-long_password='p@ss w0rd!longer'
+# VNC uses only the first 8 characters of a password. This one has a space and special characters and goes on
+# past the 255 characters that tigervncpasswd -f reads as one password; the "xyz" after them must not become
+# a second, view-only password.
+long_password="p@ss w0rd!$(printf '%0245d' 0)xyz"
+# The second line of a password must not become a view-only password either
+two_line_password=$'pw1\npw2'
 
 # Minimal RFB client that tries VncAuth with the password in argv[1] against the VNC server in the container.
 # Exits 0 when the server accepts the password, 2 when it rejects it and 1 on any other error.
@@ -125,6 +130,29 @@ vnc_passwd_holds() {
     in_c sh -c 'printf %s "$1" | tigervncpasswd -f | cmp - "$2"' sh "$1" "/home/vpnuser/$vnc_passwd"
 }
 
+# Succeed when the VNC password file in the container is a regular file of vpnuser's with mode 600.
+# stat reports an empty file as "regular empty file" and a link as "symbolic link", so both fail.
+vnc_passwd_is_private() {
+    local file_info
+    file_info=$(in_c stat -c '%F %U:%G %a' "/home/vpnuser/$vnc_passwd") || return 1
+    [ "$file_info" = "regular file vpnuser:vpnuser 600" ] && return 0
+    echo "VNC password file is: $file_info"
+    return 1
+}
+
+# Create a passwd.new next to the VNC password file in the container, as vpnuser: with "file", a regular file
+# with mode 644; with "link", a link to the password file itself
+plant_passwd_new() {
+    # The single-quoted scripts are expanded by the sh that runs them
+    # shellcheck disable=SC2016
+    case $1 in
+        file) in_c setpriv --reuid=vpnuser --regid=vpnuser --init-groups \
+            sh -c 'rm -f "$1.new" && umask 022 && printf x >"$1.new"' sh "/home/vpnuser/$vnc_passwd" ;;
+        link) in_c setpriv --reuid=vpnuser --regid=vpnuser --init-groups \
+            sh -c 'rm -f "$1.new" && ln -s passwd "$1.new"' sh "/home/vpnuser/$vnc_passwd" ;;
+    esac
+}
+
 # Succeed when the VNC server in the container accepts the password $1
 vnc_accepts() {
     in_c python3 -c "$vnc_auth" "$1"
@@ -158,7 +186,7 @@ run_checks() {
         sh -c 'touch /home/vpnuser/.write-test && rm /home/vpnuser/.write-test'
     check "default VNC size is 1280x720" vnc_size_is 1280x720
     check "VNC reads the password file in vpnuser's home" in_c sh -c 'ps -o args= -C Xtigervnc | grep -q -- "-PasswordFile $1"' sh "/home/vpnuser/$vnc_passwd"
-    check "VNC password file is vpnuser's with mode 600" in_c sh -c '[ "$(stat -c "%U:%G %a" "$1")" = "vpnuser:vpnuser 600" ]' sh "/home/vpnuser/$vnc_passwd"
+    check "VNC password file is a regular file of vpnuser's with mode 600" vnc_passwd_is_private
 }
 
 check "services started" wait_ready
@@ -194,12 +222,16 @@ check "changed preference is kept in the file" grep -q '<LocalLanAccess>false</L
 check "vpnui logged its preferences" wait_prefs_logged
 check "vpnui reads the changed preference" local_lan_access_is false
 
+# A passwd.new left next to the password file must not decide the new file's mode
 echo "--- with PASSWORD and VNC_SIZE set ---"
+check "passwd.new with mode 644 is created" plant_passwd_new file
 check "container is recreated with PASSWORD and VNC_SIZE" recreate CISCO_VPN_DATA="$test_data" PASSWORD="$long_password" VNC_SIZE=1024x768
 check "services started after recreate" wait_ready
-check "VNC password file holds PASSWORD" vnc_passwd_holds "$long_password"
+check "VNC password file holds the first 8 characters of PASSWORD" vnc_passwd_holds "${long_password:0:8}"
+check "VNC password file is a regular file of vpnuser's with mode 600" vnc_passwd_is_private
 check "VNC accepts the first 8 characters of PASSWORD" vnc_accepts "${long_password:0:8}"
 check "VNC rejects the default password" vnc_rejects password
+check "VNC rejects the characters of PASSWORD after the first 255" vnc_rejects xyz
 check "VNC size is VNC_SIZE" vnc_size_is 1024x768
 check "VNC password file is copied for comparison" cp "$test_data/$vnc_passwd" "$saved_vnc_passwd"
 
@@ -211,6 +243,22 @@ check "services started after recreate" wait_ready
 check "VNC password file is unchanged" cmp "$saved_vnc_passwd" "$test_data/$vnc_passwd"
 check "VNC accepts the first 8 characters of the saved PASSWORD" vnc_accepts "${long_password:0:8}"
 check "default VNC size is 1280x720" vnc_size_is 1280x720
+
+echo "--- with PASSWORD of two lines ---"
+check "container is recreated with PASSWORD of two lines" recreate CISCO_VPN_DATA="$test_data" PASSWORD="$two_line_password" VNC_SIZE=
+check "services started after recreate" wait_ready
+check "VNC password file holds the first line of PASSWORD" vnc_passwd_holds pw1
+check "VNC accepts the first line of PASSWORD" vnc_accepts pw1
+check "VNC rejects the second line of PASSWORD" vnc_rejects pw2
+
+# A link named passwd.new must not lead the write to the password file itself
+echo "--- with a link named passwd.new ---"
+check "passwd.new is created as a link to the VNC password file" plant_passwd_new link
+check "container restarts" docker restart cisco-vpn
+check "services started after restart" wait_ready
+check "VNC password file is a regular file of vpnuser's with mode 600" vnc_passwd_is_private
+check "VNC password file holds the first line of PASSWORD" vnc_passwd_holds pw1
+check "VNC accepts the first line of PASSWORD" vnc_accepts pw1
 
 echo "--- back on the configured data directory ---"
 check "container is recreated" recreate
