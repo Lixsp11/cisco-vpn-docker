@@ -1,0 +1,7 @@
+packages/*.deb
+packages/*.rpm
+tmp/
+.env
+.venv/
+docs/superpowers/
+.claude/

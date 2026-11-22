@@ -1,0 +1,30 @@
+services:
+  cisco-vpn:
+    build: .
+    image: cisco-vpn-docker:dev
+    container_name: cisco-vpn
+    cap_add:
+      - NET_ADMIN
+      # Needed to unmount the bind-mounted /etc/resolv.conf and /etc/hosts at startup,
+      # so that vpnagentd can replace them when it sets up VPN DNS
+      - SYS_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VNC_PASSWORD: ${VNC_PASSWORD:-password}
+    ports:
+      - "127.0.0.1:6080:6080"   # noVNC
+      - "127.0.0.1:1080:1080"   # SOCKS5
+      - "127.0.0.1:8888:8888"   # HTTP
+    mem_limit: 600m
+    memswap_limit: 1200m
+    networks:
+      - vpn-net
+    restart: "no"
+
+networks:
+  vpn-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.213.0/24
