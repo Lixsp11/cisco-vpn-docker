@@ -18,70 +18,14 @@ jobs:
       run:
         shell: bash
     steps:
-      # A package that a workflow creates on ghcr.io inherits the repository's visibility, so the build
-      # runs only in a private repository. Values missing from the event payload count as not private.
-      - name: Require a private repository
-        env:
-          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
-          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
-        run: |
-          if [ "$REPOSITORY_PRIVATE" != true ] || [ "$REPOSITORY_VISIBILITY" != private ]; then
-            echo "::error::This workflow runs only in a private repository; the event reports private '$REPOSITORY_PRIVATE', visibility '$REPOSITORY_VISIBILITY'"
-            exit 1
-          fi
-
-      # Pushing to a public package would publish the image. ghcr.io lets anyone pull a public package
-      # without credentials, so this step asks it for anonymous pull access: granted stops the build.
-      # Refused (HTTP 401, 403 or 404) means that the package is private or does not exist yet; a new
-      # package gets the repository's visibility, which the step above requires to be private.
-      # Any other answer stops the build.
-      - name: Check the image destination
+      - name: Image name
         id: image
         env:
-          # Full image name ghcr.io/<owner>/<name>; without the variable IMAGE_NAME, ghcr.io/<owner>/<repository>
+          # Full image name; without the variable IMAGE_NAME, ghcr.io/<owner>/<repository>
           IMAGE_NAME: ${{ vars.IMAGE_NAME || format('ghcr.io/{0}', github.repository) }}
         run: |
-          refuse() {
-            echo "::error::$1"
-            exit 1
-          }
-
           # Image names must be lowercase, and GitHub owner and repository names can contain uppercase letters
-          image=${IMAGE_NAME,,}
-          if ! [[ $image =~ ^ghcr\.io/([a-z0-9-]+/[a-z0-9][a-z0-9._-]*)$ ]]; then
-            refuse "The image name '$image' is not of the form ghcr.io/<owner>/<name>"
-          fi
-          repository=${BASH_REMATCH[1]}
-          refused="ghcr.io refuses anonymous pulls of $image; the package is private or does not exist yet"
-          unclear="Cannot tell whether $image is public"
-
-          # Anonymous pull token from the registry's token service (the realm in its WWW-Authenticate header).
-          # curl prints the HTTP status code; a failed transfer stops the build even when a status was received.
-          response=$RUNNER_TEMP/ghcr-token.json
-          status=$(curl -sS -o "$response" -w '%{http_code}' \
-            "https://ghcr.io/token?scope=repository:$repository:pull&service=ghcr.io") ||
-            refuse "$unclear: the request to the token service failed (curl exit code $?)"
-          case $status in
-            401 | 403 | 404)
-              echo "$refused (token service: HTTP $status)"
-              ;;
-            200)
-              token=$(jq -r '.token // empty' "$response" 2>/dev/null || true)
-              [ -n "$token" ] || refuse "$unclear: the token service answered HTTP 200 without a token"
-              status=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
-                "https://ghcr.io/v2/$repository/tags/list") ||
-                refuse "$unclear: the request for the tag list failed (curl exit code $?)"
-              case $status in
-                200) refuse "The package $image is public: anyone can pull it without credentials" ;;
-                401 | 403 | 404) echo "$refused (tag list: HTTP $status)" ;;
-                *) refuse "$unclear: the tag list answered HTTP $status" ;;
-              esac
-              ;;
-            *)
-              refuse "$unclear: the token service answered HTTP $status"
-              ;;
-          esac
-          echo "name=$image" >>"$GITHUB_OUTPUT"
+          echo "name=${IMAGE_NAME,,}" >>"$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v7
 

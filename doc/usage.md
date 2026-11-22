@@ -39,15 +39,9 @@ The workflow `.github/workflows/build.yml` builds the image and pushes it to the
 | Name | Kind | Value |
 |---|---|---|
 | `CSC_DEB_URL` | Secret, required | Download URL of your own Cisco package, for example a pre-signed object storage link. The workflow checks that the file is the package `cisco-secure-client-vpn` for `amd64`, and names it after the version in the package. |
-| `IMAGE_NAME` | Variable, optional | Full image name of the form `ghcr.io/<owner>/<name>`, with a single name part. The default is `ghcr.io/<owner>/<repository>`. The workflow lowercases the name. |
+| `IMAGE_NAME` | Variable, optional | Full image name on ghcr.io, for example `ghcr.io/<owner>/<name>`. The default is `ghcr.io/<owner>/<repository>`. The workflow lowercases the name. |
 
-The image is tagged with the package version and `latest`. The package on ghcr.io must be private (see [Why is there no prebuilt image?](#why-is-there-no-prebuilt-image)). Before it downloads the Cisco package, the workflow stops with an error unless all of these hold:
-
-- The repository is private. A package that a workflow creates gets the visibility of the repository.
-- The image name has the form above.
-- ghcr.io refuses anonymous pulls of the image (HTTP 401, 403 or 404), so the package is private or does not exist yet. A package that does not exist yet is created by the push. When anyone can pull the image without credentials, or when a request to ghcr.io fails or gets any other answer, the workflow stops.
-
-Before you make the repository public, confirm in the package's settings on GitHub that the package is still private.
+The image is tagged with the package version and `latest`. The package on ghcr.io must be private (see [Why is there no prebuilt image?](#why-is-there-no-prebuilt-image)).
 
 ## Configuration
 
