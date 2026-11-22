@@ -53,12 +53,18 @@ pending_signal=
 # Add the host route to $1 via $2 with MTU $3, and record it as this script's own only when the add succeeds: a
 # route that another process created first, for which the add fails with "File exists", is never deleted here.
 # HUP, INT, TERM and PIPE are deferred from before the add until the route is recorded, and then end the script.
+# The ip process ignores them: a signal that reached it after the kernel created the route but before it exited
+# would otherwise kill it, and the route would stay without a record. The subshell ignores them before it execs
+# ip, and ignored signals stay ignored across exec.
 # Keeps ip's output in route_add_output and returns ip's exit status.
 add_route() {
     local status=0
     pending_signal=
     trap 'pending_signal=1' HUP INT TERM PIPE
-    route_add_output=$(ip route add "$1" via "$2" mtu "$3" 2>&1) || status=$?
+    route_add_output=$(
+        trap '' HUP INT TERM PIPE
+        exec ip route add "$1" via "$2" mtu "$3" 2>&1
+    ) || status=$?
     if [ "$status" = 0 ]; then
         route_dest=$1
         route_via=$2
