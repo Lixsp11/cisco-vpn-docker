@@ -186,7 +186,7 @@ vpn_diag() {
     timeout 15 "$CSC_BIN/vpn" state
 
     section "Cisco processes (RSS in KB)"
-    show_processes vpn
+    show_processes "$CSC_DIR"
 
     section "Files under $CSC_DIR newer than /etc/hostname (modified after the container was created or started)"
     find "$CSC_DIR" -newer /etc/hostname -type f -printf '%TY-%Tm-%Td %TH:%TM  %10s  %p\n' | sort
