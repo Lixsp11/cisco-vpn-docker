@@ -1,21 +1,25 @@
+# Example deployment. doc/usage.md describes the variables, ports, route mode and data directory.
 services:
   cisco-vpn:
     build: .
     image: cisco-vpn-docker:dev
     container_name: cisco-vpn
     cap_add:
+      # Tunnel interface, routes and the container's firewall rules; without it the container stops at startup
       - NET_ADMIN
       # Needed to unmount the bind-mounted /etc/resolv.conf and /etc/hosts at startup,
       # so that vpnagentd can replace them when it sets up VPN DNS
       - SYS_ADMIN
     devices:
+      # The Cisco client creates its tunnel interface through /dev/net/tun
       - /dev/net/tun:/dev/net/tun
     sysctls:
       # Route mode: the container forwards packets between the host and the VPN tunnel
       net.ipv4.ip_forward: 1
+    # Set these in .env next to this file or in the environment of docker compose; empty means the default
     environment:
-      # VNC password (only the first 8 characters of its first line count; empty keeps the saved one)
-      # and window size. The defaults are in start.sh.
+      # VNC password (only the first 8 characters of its first line count; empty keeps the saved one, and
+      # without a saved one the password is "password") and window size (default 1280x720)
       PASSWORD: ${PASSWORD:-}
       VNC_SIZE: ${VNC_SIZE:-}
       # The SOCKS5 proxy requires a username and password only when SOCKS_USER and SOCKS_PASSWD are both set;
@@ -23,18 +27,20 @@ services:
       SOCKS_USER: ${SOCKS_USER:-}
       SOCKS_PASSWD: ${SOCKS_PASSWD:-}
       NODANTED: ${NODANTED:-}
-      # Keepalive, so that the VPN connection is not dropped as idle: every PING_INTERVAL seconds, ping the address
-      # PING_ADDR and request the URL PING_ADDR_URL, each only when set. The default interval is in start.sh.
+      # Keepalive, so that the VPN connection is not dropped as idle: every PING_INTERVAL seconds (a whole number
+      # above 0, default 1800), ping the address PING_ADDR and request the URL PING_ADDR_URL, each only when set.
+      # Failures are logged with the address or URL as given, so keep secrets out of PING_ADDR_URL.
       PING_ADDR: ${PING_ADDR:-}
       PING_ADDR_URL: ${PING_ADDR_URL:-}
       PING_INTERVAL: ${PING_INTERVAL:-}
+    # Bound to 127.0.0.1: the proxies accept any client that reaches them. Use SSH port forwarding from other machines.
     ports:
       - "127.0.0.1:6080:6080"   # noVNC
       - "127.0.0.1:1080:1080"   # SOCKS5
       - "127.0.0.1:8888:8888"   # HTTP
     volumes:
-      # Home directory of the GUI user: Cisco preferences (gateway address, local LAN access)
-      # and the login page's cookies
+      # Home directory of the GUI user: the Cisco user preferences (.vpn/.anyconnect), the VNC password
+      # (.vnc/passwd) and anything else the Cisco client and its login window save there
       - ${CISCO_VPN_DATA:-${HOME}/.cisco-vpn-data}:/home/vpnuser
     mem_limit: 600m
     memswap_limit: 1200m
@@ -43,6 +49,8 @@ services:
     restart: "no"
 
 networks:
+  # The container's local network, from which the host connects to it.
+  # Change the subnet if it overlaps a network that the host or the VPN uses.
   vpn-net:
     driver: bridge
     ipam:
