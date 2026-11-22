@@ -2,7 +2,8 @@
 # Cisco Secure Client steps of the entrypoint. start.sh sources this file and calls only:
 #   vpn_prepare  preparation before any service starts
 #   vpn_start    starts the client processes with start.sh's run_service
-# Uses log, run_service, VPN_USER and DISPLAY from start.sh.
+# Uses log, run_service, VPN_USER and DISPLAY from start.sh; vpn_prepare runs after start.sh has given
+# the home directory to VPN_USER.
 
 CSC_BIN=/opt/cisco/secureclient/bin
 
@@ -13,14 +14,14 @@ CSC_BIN=/opt/cisco/secureclient/bin
 # while the tunnel is up; otherwise Cisco's firewall drops new connections from the local network.
 # The gateway must allow local LAN access as well:
 # https://www.cisco.com/c/en/us/support/docs/security/secure-client-5/221024-configure-local-lan-access-for-secure-cl.html
-# Only what is created here is given to the GUI user.
+# The copy runs as the GUI user, so what it creates is the user's, and links inside the volume can only
+# lead it where that user may write anyway. cp -n creates the file exclusively and never replaces one.
+# The home directory must already belong to the GUI user (start.sh's prepare_home).
 seed_preferences() {
-    local dir=/home/$VPN_USER/.vpn
-    [ -e "$dir/.anyconnect" ] && return
-    if [ ! -d "$dir" ]; then
-        mkdir "$dir" && chown "$VPN_USER:" "$dir" || return
-    fi
-    cp /etc/skel-vpnuser/.vpn/.anyconnect "$dir/.anyconnect" && chown "$VPN_USER:" "$dir/.anyconnect"
+    # The single-quoted script is expanded by the sh that runs it
+    # shellcheck disable=SC2016
+    setpriv --reuid="$VPN_USER" --regid="$VPN_USER" --init-groups \
+        sh -c 'mkdir -p "$1" && cp -n /etc/skel-vpnuser/.vpn/.anyconnect "$1/.anyconnect"' sh "/home/$VPN_USER/.vpn"
 }
 
 vpn_prepare() {
