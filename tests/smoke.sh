@@ -200,11 +200,20 @@ restart_danted_checks() {
     check "SOCKS5 proxy works after danted restarts" socks5_works socks5h://127.0.0.1:1080
 }
 
+# Succeed when danted runs as the user socks and the socket listening on port 1080 in the container belongs to socks.
+# danted runs with the effective user socks, and reading the sockets of such a process needs CAP_SYS_PTRACE,
+# which the container does not have, so ss -p shows no process for the port; ss -e shows the socket's owner.
+socks5_port_is_danteds() {
+    # The single-quoted script is expanded by the sh that runs it
+    # shellcheck disable=SC2016
+    in_c sh -c 'pgrep -x -u socks danted >/dev/null && ss -Hltne "sport = :1080" | grep -q " uid:$(id -u socks) "'
+}
+
 # Checks of the SOCKS5 proxy of a container started without SOCKS_PASSWD and NODANTED, while no VPN is
 # connected. The temporary tunnel interface for danted's start is removed before danted's ready line is logged.
 run_socks5_checks() {
     check "danted listens on port 1080" wait_danted
-    check "SOCKS5 port is danted's" in_c sh -c 'ss -ltnp | grep ":1080 " | grep -q danted'
+    check "SOCKS5 port is danted's" socks5_port_is_danteds
     check "SOCKS5 proxy works" socks5_works socks5h://127.0.0.1:1080
     check "no temporary tunnel interface is left" in_c sh -c '! ip link show cscotun0'
 }
