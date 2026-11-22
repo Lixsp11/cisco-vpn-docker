@@ -2,12 +2,14 @@
 # Chooses the image's VPN client at build time, before anything is installed, and writes its name to
 # /etc/vpn-type, which the next build step and start.sh read:
 #   cisco        the Cisco Secure Client package in /tmp/packages (packages/ of the build context): the file that
-#                the build argument CSC_DEB names, or else the only .deb file there, which must then be named
-#                cisco-secure-client-vpn_<version>_amd64.deb. /tmp/cisco-secure-client-vpn.deb then links to it.
+#                the build argument CSC_DEB names, or else the only .deb file there.
+#                /tmp/cisco-secure-client-vpn.deb then links to it.
 #   openconnect  when CSC_DEB is empty and /tmp/packages holds no .deb file
-# Fails, and says why, when CSC_DEB names no file in packages/, or when CSC_DEB is empty and packages/ holds several
-# .deb files or one with another name: it never picks one of several packages, and never builds the openconnect
-# image from a context that holds a package.
+# Every .deb file in packages/, hidden ones and those in subdirectories included, must be a Cisco package named
+# cisco-secure-client-vpn_<version>_amd64.deb directly in packages/, and CSC_DEB must be the name of one of them,
+# without a directory. Fails, and says why, when one is not, or when CSC_DEB is empty and packages/ holds several:
+# it never picks one of several packages, never builds the openconnect image from a context that holds a package,
+# and never builds an image whose layers keep a .deb file that it does not install.
 set -euo pipefail
 
 packages=/tmp/packages
@@ -24,28 +26,37 @@ use_cisco() {
     echo "VPN client: cisco, from packages/$1"
 }
 
+# The .deb files under packages/, as paths relative to it, whatever the case of the extension
+mapfile -t debs < <(find "$packages" -iname '*.deb' -printf '%P\n' | sort)
+for deb in "${debs[@]}"; do
+    if [[ $deb != cisco-secure-client-vpn_*_amd64.deb || $deb == */* ]]; then
+        fail "packages/ holds $deb; every .deb file in packages/ must be a Cisco package named" \
+            "cisco-secure-client-vpn_<version>_amd64.deb directly in packages/, so remove or rename it"
+    fi
+done
+
 if [ -n "${CSC_DEB:-}" ]; then
-    [ -f "$packages/$CSC_DEB" ] || fail "the build argument CSC_DEB names $CSC_DEB, which is not a file in packages/"
-    use_cisco "$CSC_DEB"
-    exit 0
+    [[ $CSC_DEB != */* ]] ||
+        fail "the build argument CSC_DEB is $CSC_DEB; it must be the name of a file in packages/, without a directory"
+    for deb in "${debs[@]}"; do
+        if [ "$deb" = "$CSC_DEB" ]; then
+            use_cisco "$deb"
+            exit 0
+        fi
+    done
+    fail "the build argument CSC_DEB names $CSC_DEB, which is not a .deb file in packages/"
 fi
 
-shopt -s nullglob
-debs=("$packages"/*.deb)
 case ${#debs[@]} in
     0)
         echo openconnect >/etc/vpn-type
         echo "VPN client: openconnect, since packages/ holds no .deb file"
         ;;
     1)
-        name=${debs[0]##*/}
-        [[ $name == cisco-secure-client-vpn_*_amd64.deb ]] ||
-            fail "packages/ holds $name, which is not named cisco-secure-client-vpn_<version>_amd64.deb;" \
-                "rename it, or name it with the build argument CSC_DEB"
-        use_cisco "$name"
+        use_cisco "${debs[0]}"
         ;;
     *)
-        fail "packages/ holds several .deb files (${debs[*]##*/}); name the one to install with the build" \
+        fail "packages/ holds several Cisco packages (${debs[*]}); name the one to install with the build" \
             "argument CSC_DEB, or remove the others"
         ;;
 esac

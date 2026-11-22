@@ -10,7 +10,7 @@
 VPN_TUN=tun0
 
 vpn_prepare() {
-    :
+    log "the openconnect login is not implemented yet; nothing is prepared for it"
 }
 
 vpn_start() {
