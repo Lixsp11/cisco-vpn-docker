@@ -1,5 +1,5 @@
 #!/bin/bash
-# Container entrypoint: starts VNC, noVNC, the VPN client, the SOCKS5 and HTTP proxies,
+# Container entrypoint: starts VNC, noVNC, the firewall, the VPN client, the SOCKS5 and HTTP proxies,
 # and keeps them running. Each service's output is prefixed with [service] in docker logs.
 
 # Unprivileged user that runs the VPN client's GUI, created in the Dockerfile.
@@ -9,6 +9,8 @@ VPN_USER=vpnuser
 # VPN client steps: defines VPN_TUN, vpn_prepare and vpn_start
 # shellcheck source=/dev/null
 source /usr/local/bin/vpn-cisco.sh
+# firewall.sh reads the tunnel interface from the environment
+export VPN_TUN
 
 log() {
     echo "[start] $*"
@@ -194,6 +196,10 @@ run_service flwm flwm
 # noVNC: make the root path open vnc.html
 [ -e /usr/share/novnc/index.html ] || ln -s vnc.html /usr/share/novnc/index.html
 run_service novnc python3 -m websockify --web=/usr/share/novnc 6080 127.0.0.1:5901
+
+# Firewall: its rules are in place before the VPN client starts, and the watch keeps them first in their chains
+firewall.sh apply 2>&1 | sed 's/^/[firewall] /'
+run_service firewall firewall.sh watch
 
 vpn_start
 
