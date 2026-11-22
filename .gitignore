@@ -5,3 +5,4 @@ tmp/
 .venv/
 docs/superpowers/
 .claude/
+.superpowers/
