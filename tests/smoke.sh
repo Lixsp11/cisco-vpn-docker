@@ -14,8 +14,9 @@
 # that cannot be set (and restarts it with an account of the proxy's left from an earlier start), with
 # SOCKS_USER naming each of the image's accounts and a malformed SOCKS_USER, and with NODANTED set. It recreates
 # it with PING_ADDR set to an address that does not answer, with PING_ADDR and PING_ADDR_URL set to the
-# container's own address and a web server that the checks start in it (and restarts it), with PING_INTERVAL
-# empty and with a PING_INTERVAL of 0. Then it
+# container's own address and a web server that the checks start in it (and restarts it, then stops it while a
+# keepalive request waits for a server that never answers), with PING_INTERVAL empty and with a PING_INTERVAL of
+# 0. Then it
 # checks the persistent home directory: it changes a preference and recreates the container again, recreates
 # it with PASSWORD and VNC_SIZE set, once more with both empty and once with a PASSWORD of two lines, once with
 # another PASSWORD that cannot be written because the VNC password's directory is read-only, and finally
@@ -48,6 +49,21 @@ unreachable_addr=192.0.2.1
 # Web server that the keepalive checks start in the container for PING_ADDR_URL, and the file of its request log
 keepalive_url=http://127.0.0.1:18080/
 keepalive_log=/tmp/ka.log
+
+# Server for PING_ADDR_URL that never answers: it listens on the web server's port and never accepts a connection.
+# The kernel still completes the connections in the listen queue, so a request is sent and then waits.
+silent_server=$(
+    cat <<'EOF'
+import socket
+import time
+
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", 18080))
+sock.listen()
+time.sleep(3600)
+EOF
+)
 
 # Minimal RFB client that tries VncAuth with the password in argv[1] against the VNC server in the container.
 # Exits 0 when the server accepts the password, 2 when it rejects it and 1 on any other error.
@@ -441,6 +457,57 @@ keepalive_logs_nothing_for() {
     return 1
 }
 
+# Succeed when no keepalive check runs in the container. run_service prefixes a service's output with a sed whose
+# command line holds the service's name in brackets, so the keepalive runs while a process has "[keepalive]" in it.
+keepalive_is_off() {
+    local processes status=0
+    processes=$(in_c pgrep -af '\[keepalive\]') || status=$?
+    [ "$status" -eq 1 ] && return 0
+    printf 'pgrep exited with %s; keepalive processes:\n%s\n' "$status" "$processes"
+    return 1
+}
+
+# Stop the container while a keepalive request waits for silent_server, and succeed when the request's timeout and
+# wget processes are in start.sh's process group, which the kill in stop_all signals, the container stops with
+# code 0 within 5 seconds, before Docker's grace period of 10 seconds ends, and neither process is left.
+# The PIDs and process groups are the host's, as docker top shows them.
+stop_during_stalled_request() {
+    local start_pgid processes pid pgid started stop_ms code deadline=$((SECONDS + 10))
+    start_pgid=$(ps -o pgid= -p "$(docker inspect -f '{{.State.Pid}}' cisco-vpn)") || return 1
+    start_pgid=${start_pgid// /}
+    # A request that started at most 2 seconds ago has about 8 seconds left before its timeout of 10 seconds
+    while :; do
+        processes=$(docker top cisco-vpn -o pid,pgid,etimes,args | awk 'NR > 1 && / busybox wget / && $3 <= 2')
+        [ "$(grep -c . <<<"$processes")" = 2 ] && break
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "no new keepalive request with its timeout and wget processes within 10 seconds"
+            return 1
+        fi
+        sleep 0.5
+    done
+    while read -r pid pgid _; do
+        if [ "$pgid" != "$start_pgid" ]; then
+            echo "process $pid of the request is in process group $pgid, start.sh in $start_pgid:"
+            printf '%s\n' "$processes"
+            return 1
+        fi
+    done <<<"$processes"
+    started=$(date +%s%N)
+    docker stop cisco-vpn >/dev/null || return 1
+    stop_ms=$((($(date +%s%N) - started) / 1000000))
+    code=$(docker inspect -f '{{.State.ExitCode}}' cisco-vpn) || return 1
+    if [ "$stop_ms" -ge 5000 ] || [ "$code" != 0 ]; then
+        echo "the container stopped in $stop_ms ms with code $code"
+        return 1
+    fi
+    while read -r pid _; do
+        if [ -e "/proc/$pid" ]; then
+            echo "process $pid of the request is left after the stop"
+            return 1
+        fi
+    done <<<"$processes"
+}
+
 # Checks of the keepalive of a container started with PING_ADDR=127.0.0.1, PING_ADDR_URL=$keepalive_url and
 # PING_INTERVAL=2: starts the web server for PING_ADDR_URL in the container, then stops it again.
 # A request through the keepalive appears in the server's log within 10 seconds; while the ping and the request
@@ -680,6 +747,11 @@ check "container restarts" docker restart cisco-vpn
 check "services started after restart" wait_ready
 run_keepalive_url_checks
 
+# The stop's signal must reach a request in progress, so that it ends with the other services
+echo "--- while a keepalive request waits for a server that never answers ---"
+check "server that never answers is started in the container" docker exec -d cisco-vpn python3 -c "$silent_server"
+check "container stops during the request" stop_during_stalled_request
+
 # The keepalive starts its first wait before the ready line
 echo "--- with PING_INTERVAL empty ---"
 check "container is recreated with PING_ADDR and PING_INTERVAL empty" recreate CISCO_VPN_DATA="$test_data" \
@@ -687,15 +759,15 @@ check "container is recreated with PING_ADDR and PING_INTERVAL empty" recreate C
 check "services started after recreate" wait_ready
 check "keepalive waits 1800 seconds by default" in_c pgrep -fx 'sleep 1800'
 
-# An interval of 0 seconds would ping and request without a pause. Neither address here answers, and no web server
-# runs, so a running keepalive would log within 5 seconds.
+# An interval of 0 seconds would ping and request without a pause, so the keepalive must not start at all, with
+# this interval or with the default one
 echo "--- with a PING_INTERVAL of 0 ---"
 check "container is recreated with PING_INTERVAL=0" recreate CISCO_VPN_DATA="$test_data" \
     PASSWORD= VNC_SIZE= SOCKS_USER= SOCKS_PASSWD= NODANTED= PING_ADDR="$unreachable_addr" PING_ADDR_URL="$keepalive_url" \
     PING_INTERVAL=0
 check "services started after recreate" wait_ready
 check "refused PING_INTERVAL is logged" wait_log '^\[start\] error: PING_INTERVAL is not a whole number of seconds above 0'
-check "keepalive does not run" keepalive_logs_nothing_for 5
+check "keepalive does not run" keepalive_is_off
 
 # A preference file that already exists holds the user's choices and must be kept as a whole:
 # the edit turns LocalLanAccess off and adds a gateway address, and the file is compared byte for byte
