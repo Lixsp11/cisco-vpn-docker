@@ -11,8 +11,8 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
-      # VNC password (only the first 8 characters count; empty keeps the saved one) and window size.
-      # The defaults are in start.sh.
+      # VNC password (only the first 8 characters of its first line count; empty keeps the saved one)
+      # and window size. The defaults are in start.sh.
       PASSWORD: ${PASSWORD:-}
       VNC_SIZE: ${VNC_SIZE:-}
     ports:

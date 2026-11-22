@@ -50,13 +50,17 @@ prepare_home() {
 # VNC password file, in the GUI user's home so that it is kept with the user's other settings
 VNC_PASSWD_FILE=/home/$VPN_USER/.vnc/passwd
 
-# Set the VNC password from PASSWORD; VncAuth uses only its first 8 characters.
+# Set the VNC password from PASSWORD. The password is the first 8 characters of PASSWORD's first line:
+# VncAuth uses only 8 characters, and tigervncpasswd -f, which reads a password per line of up to
+# 255 characters, would store a second password from the rest as a view-only password.
 # An empty PASSWORD keeps the saved password, and without a saved password the password is "password".
 # The GUI user writes the file, so root writes nothing below the volume; Xtigervnc, running as root, only reads it.
-# The new file replaces the old one only once it is complete, so a failed write keeps the old password.
+# The password goes to a new file from mktemp (created exclusively, mode 600) in the same directory, which
+# replaces the old file only once it is complete, so a failed write keeps the old password.
 # The home directory must already belong to the GUI user (prepare_home).
 prepare_vnc_password() {
-    local vnc_password=$PASSWORD
+    local vnc_password=${PASSWORD%%$'\n'*}
+    vnc_password=${vnc_password:0:8}
     if [ -z "$vnc_password" ]; then
         [ -e "$VNC_PASSWD_FILE" ] && return
         vnc_password=password
@@ -64,10 +68,15 @@ prepare_vnc_password() {
     fi
     # The single-quoted script is expanded by the sh that runs it
     # shellcheck disable=SC2016
-    printf %s "$vnc_password" | setpriv --reuid="$VPN_USER" --regid="$VPN_USER" --init-groups \
-        sh -c 'umask 077 && mkdir -p "$(dirname "$1")" && tigervncpasswd -f >"$1.new" && [ -s "$1.new" ] && mv -f "$1.new" "$1"' \
-        sh "$VNC_PASSWD_FILE" ||
-        log "warning: cannot write the VNC password file $VNC_PASSWD_FILE"
+    printf %s "$vnc_password" | setpriv --reuid="$VPN_USER" --regid="$VPN_USER" --init-groups sh -c '
+        umask 077
+        mkdir -p "$(dirname "$1")" && new=$(mktemp "$1.XXXXXX") || exit 1
+        if tigervncpasswd -f >"$new" && [ -s "$new" ] && mv -f "$new" "$1"; then
+            exit 0
+        fi
+        rm -f "$new"
+        exit 1
+    ' sh "$VNC_PASSWD_FILE" || log "warning: cannot write the VNC password file $VNC_PASSWD_FILE"
 }
 
 # Remove stale X locks from a previous run
