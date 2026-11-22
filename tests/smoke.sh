@@ -6,8 +6,9 @@
 # firewall moves its rules back to the top and keeps the other rule, and removes that rule again. Restarts the
 # container, waits again and runs every check once more, then restarts it once more while giving the temporary
 # tunnel interface its address fails. Then recreates the container on an empty data directory of its own under
-# the repository's tmp/ and runs every check there. On that directory it recreates the container with
-# SOCKS_USER and SOCKS_PASSWD set and restarts it, recreates it with only SOCKS_USER set, with a SOCKS_PASSWD
+# the repository's tmp/ and runs every check there. On that directory it restarts the container while iptables
+# and iptables-restore fail and checks that it stops before it starts the VPN client. It recreates the container
+# with SOCKS_USER and SOCKS_PASSWD set and restarts it, recreates it with only SOCKS_USER set, with a SOCKS_PASSWD
 # that cannot be set (and restarts it with an account of the proxy's left from an earlier start), with
 # SOCKS_USER naming each of the image's accounts and a malformed SOCKS_USER, and with NODANTED set. Then it
 # checks the persistent home directory: it changes a preference and recreates the container again, recreates
@@ -237,6 +238,44 @@ EOF
     in_c touch "$fail_ip_addr_flag"
 }
 
+# Install a command named $1 in the container's /usr/local/sbin, which comes before the system's directories in
+# PATH, that fails every time
+install_failing_command() {
+    docker exec -i cisco-vpn sh -c 'cat >"/usr/local/sbin/$1" && chmod 755 "/usr/local/sbin/$1"' sh "$1" <<EOF
+#!/bin/sh
+# Installed by tests/smoke.sh: fails every time
+echo "$1 fails for the smoke test" >&2
+exit 1
+EOF
+}
+
+# Succeed when the container stops within 30 seconds with an exit code other than 0
+container_exits_with_error() {
+    local state deadline=$((SECONDS + 30))
+    while state=$(docker inspect -f '{{.State.Running}} {{.State.ExitCode}}' cisco-vpn); do
+        case $state in
+            "false 0")
+                echo "the container exited with code 0"
+                return 1
+                ;;
+            false\ *) return 0 ;;
+        esac
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "the container still runs after 30 seconds"
+            return 1
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# Succeed when vpnagentd logged nothing since the container's current start, which it does when it starts
+vpnagentd_logged_nothing() {
+    local since
+    since=$(docker inspect -f '{{.State.StartedAt}}' cisco-vpn) || return 1
+    ! docker logs --since "$since" cisco-vpn 2>&1 | grep '^\[vpnagentd\]'
+}
+
 # Succeed when cscotun0 is missing at least once in about 3 seconds. While giving the temporary interface its
 # address fails, run_service retries every second, and each try creates the interface and removes it at once,
 # so only an interface that stays exists every time.
@@ -413,6 +452,16 @@ check "default preferences are in the test data directory" test -f "$test_data/$
 check "VNC password file holds the default password" vnc_passwd_holds password
 check "default VNC password warning is logged" wait_log '^\[start\] warning: PASSWORD is not set'
 check "VNC accepts the default password" vnc_accepts password
+
+# Without its firewall rules the container would accept connections from the VPN side, so it must stop instead.
+# The restart makes start.sh find the failing commands first in PATH; the recreate of the next section removes them.
+echo "--- while the firewall rules cannot be put in place ---"
+check "failing iptables is installed" install_failing_command iptables
+check "failing iptables-restore is installed" install_failing_command iptables-restore
+check "container restarts" docker restart cisco-vpn
+check "container exits with an error" container_exits_with_error
+check "firewall failure is logged" wait_log '^\[start\] error: cannot put the firewall rules in place'
+check "vpnagentd is not started" vpnagentd_logged_nothing
 
 echo "--- with SOCKS_USER and SOCKS_PASSWD set ---"
 check "container is recreated with SOCKS_USER and SOCKS_PASSWD" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
