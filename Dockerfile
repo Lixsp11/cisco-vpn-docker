@@ -7,7 +7,10 @@ ARG CSC_DEB=cisco-secure-client-vpn_5.1.20.333_amd64.deb
 COPY packages/${CSC_DEB} /tmp/${CSC_DEB}
 
 # Install VNC, noVNC, WebKit for the login window, diagnostic tools and proxies first,
-# then the Cisco package (apt resolves its Depends)
+# then the Cisco package (apt resolves its Depends).
+# Versions are not pinned: the Debian archive keeps only the current version of each package,
+# so pins would break the build after the next point release or security update.
+# hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       tigervnc-standalone-server tigervnc-tools flwm \

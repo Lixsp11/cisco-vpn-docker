@@ -20,7 +20,10 @@ run_service() {
         "$@"
         echo "exited (code $?), restarting in 1 second"
         sleep 1
-    done 2>&1 | (trap '' TERM INT; exec sed -u "s/^/[$name] /") &
+    done 2>&1 | (
+        trap '' TERM INT
+        exec sed -u "s/^/[$name] /"
+    ) &
 }
 
 # On SIGTERM/SIGINT, stop every service in this process group and exit.
@@ -45,7 +48,7 @@ for f in /etc/resolv.conf /etc/hosts; do
     if mountpoint -q "$f"; then
         content=$(cat "$f")
         if umount "$f"; then
-            printf '%s\n' "$content" > "$f"
+            printf '%s\n' "$content" >"$f"
         else
             log "warning: cannot unmount $f; VPN DNS setup will fail (the container needs SYS_ADMIN)"
         fi
@@ -58,7 +61,7 @@ if [ "$VNC_PASSWORD" = password ]; then
     log "warning: VNC_PASSWORD is the default value 'password'"
 fi
 mkdir -p "$HOME/.vnc"
-printf %s "$VNC_PASSWORD" | tigervncpasswd -f > "$HOME/.vnc/passwd"
+printf %s "$VNC_PASSWORD" | tigervncpasswd -f >"$HOME/.vnc/passwd"
 chmod 600 "$HOME/.vnc/passwd"
 
 run_service vnc Xtigervnc :1 -geometry "${VNC_SIZE:-1280x800}" -depth 24 -rfbport 5901 -localhost=1 \
@@ -88,8 +91,8 @@ run_service vpnagentd "$CSC_BIN/vpnagentd" -execv_instance
 register_login() {
     local pid=$1
     printf '[7] [%05d] [%-4s] [%-8s] [%-12s] [%-20s] [0.0.0.0        ] [%s]\n' \
-        "$pid" "$DISPLAY" "$VPN_USER" "$DISPLAY" "$DISPLAY" "$(date -u +%Y-%m-%dT%H:%M:%S,000000+00:00)" \
-        | utmpdump -r > /var/run/utmp 2>/dev/null
+        "$pid" "$DISPLAY" "$VPN_USER" "$DISPLAY" "$DISPLAY" "$(date -u +%Y-%m-%dT%H:%M:%S,000000+00:00)" |
+        utmpdump -r >/var/run/utmp 2>/dev/null
 }
 sleep 2
 # The container cannot create user namespaces, so the WebKit sandbox cannot be created; disable it
@@ -103,7 +106,7 @@ run_vpnui() {
     local session_pid=$!
     register_login "$session_pid"
     wait "$session_pid"
-    : > /var/run/utmp
+    : >/var/run/utmp
 }
 run_service vpnui run_vpnui
 

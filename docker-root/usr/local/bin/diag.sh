@@ -58,6 +58,8 @@ ls -l /dev/net/tun
 
 section "Related processes (RSS in KB)"
 ps -eo pid,rss,args | head -n 1
+# Filter ps output rather than use pgrep, which cannot print the RSS column
+# shellcheck disable=SC2009
 ps -eo pid,rss,args | grep -E 'vpn|Xtiger|websockify|microsocks|tinyproxy|flwm' | grep -vE 'grep|sed -u'
 
 section "Memory (free -m)"
