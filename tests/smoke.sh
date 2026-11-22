@@ -47,7 +47,10 @@
 # it recreates the container with VPN_SERVER=127.0.0.1 and CLI_OPTS set: it checks that the host reaches a test
 # listener on [::1]:29786 in the container through 127.0.0.1:29786 and cannot reach VNC on 5901, then starts a test
 # gateway in the container that asks for single sign-on in an external browser, and checks that the login URL is
-# logged, that openconnect runs with CLI_OPTS and listens for the callback, and that the host reaches that listener.
+# logged, that openconnect runs with the arguments of CLI_OPTS and --interface=tun0 and listens for the callback, and
+# that the host reaches that listener, also after it stops socat and closes the login terminal. Then it recreates the
+# container with CLI_OPTS=--interface=tun1 and checks that openconnect is refused, and checks how the container
+# splits other values of CLI_OPTS and which of them set the tunnel interface.
 # Exits 0 when every check passes, 1 otherwise.
 
 # lib.sh is linted on its own
@@ -92,8 +95,9 @@ callback_port=29786
 test_gateway=127.0.0.1
 test_gateway_cert=/tmp/smoke-gateway.pem
 test_login_url=https://127.0.0.1/smoke-sso-login
-# CLI_OPTS of the openconnect checks; it must reach openconnect as these two arguments
-test_cli_opts="--cafile=$test_gateway_cert --useragent=smoke-test-agent"
+# CLI_OPTS of the openconnect checks; it must reach openconnect as the two arguments --cafile=<certificate file> and
+# --useragent=smoke test agent
+test_cli_opts="--cafile=$test_gateway_cert --useragent='smoke test agent'"
 # External browser of openconnect, which prints the login URL
 login_url_printer=/usr/local/bin/print-login-url.sh
 
@@ -938,13 +942,86 @@ callback_listener_is_openconnects() {
 }
 
 # Succeed when the host gets openconnect's answer to a request that is not a callback, 404 Not Found, from
-# http://127.0.0.1:29786/callback-test. openconnect closes the connection without an answer when the request line is
-# shorter than 15 characters, as "GET / HTTP/1.1" is (handle_external_browser in hpke.c of openconnect 9.01).
+# http://127.0.0.1:29786/callback-test within 10 seconds. openconnect closes the connection without an answer when the
+# request line is shorter than 15 characters, as "GET / HTTP/1.1" is (handle_external_browser in hpke.c of
+# openconnect 9.01).
 host_reaches_callback_listener() {
-    local code
-    code=$(curl -sS -o /dev/null -w '%{http_code}' --noproxy '' --max-time 5 "http://127.0.0.1:$callback_port/callback-test")
-    [ "$code" = 404 ] && return 0
+    local code deadline=$((SECONDS + 10))
+    while :; do
+        code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '' --max-time 5 \
+            "http://127.0.0.1:$callback_port/callback-test")
+        [ "$code" = 404 ] && return 0
+        [ "$SECONDS" -lt "$deadline" ] || break
+        sleep 1
+    done
     echo "the host got the status $code"
+    return 1
+}
+
+# Succeed when, within 30 seconds, the login URL has been logged $1 times since the container's current start
+login_url_logged_times() {
+    local started count deadline=$((SECONDS + 30))
+    started=$(docker inspect -f '{{.State.StartedAt}}' cisco-vpn) || return 1
+    while :; do
+        count=$(docker logs --since "$started" cisco-vpn 2>&1 |
+            grep -cxF "[openconnect] open this URL in your browser to log in: $test_login_url")
+        [ "$count" -ge "$1" ] && return 0
+        [ "$SECONDS" -lt "$deadline" ] || break
+        sleep 1
+    done
+    echo "the login URL was logged $count times"
+    return 1
+}
+
+# Print the arguments, one per line, that vpn-openconnect.sh in the container makes of CLI_OPTS=$1, and then
+# "(sets the interface)" when they set openconnect's tunnel interface. Fails when it cannot split CLI_OPTS.
+split_cli_opts() {
+    # The single-quoted script is expanded by the bash that runs it
+    # shellcheck disable=SC2016
+    docker exec -e CLI_OPTS="$1" cisco-vpn bash -c 'source /usr/local/bin/vpn-openconnect.sh && parse_cli_opts || exit 1
+        [ "${#CLI_ARGS[@]}" = 0 ] || printf "%s\n" "${CLI_ARGS[@]}"
+        if sets_interface "${CLI_ARGS[@]}"; then echo "(sets the interface)"; fi'
+}
+
+# Succeed when vpn-openconnect.sh in the container makes exactly the arguments $2... of CLI_OPTS=$1, which do not
+# set the tunnel interface
+cli_opts_split_into() {
+    local output
+    output=$(split_cli_opts "$1") || {
+        echo "CLI_OPTS cannot be split"
+        return 1
+    }
+    [ "$output" = "$(printf '%s\n' "${@:2}")" ] && return 0
+    printf 'CLI_OPTS is split into:\n%s\n' "$output"
+    return 1
+}
+
+# Succeed when vpn-openconnect.sh in the container finds that CLI_OPTS=$1 sets the tunnel interface
+cli_opts_set_interface() {
+    local output
+    output=$(split_cli_opts "$1") || {
+        echo "CLI_OPTS cannot be split"
+        return 1
+    }
+    [ "$(tail -n 1 <<<"$output")" = "(sets the interface)" ] && return 0
+    printf 'CLI_OPTS is split into:\n%s\n' "$output"
+    return 1
+}
+
+# Succeed when vpn-openconnect.sh in the container cannot split CLI_OPTS=$1
+cli_opts_cannot_be_split() {
+    local output
+    output=$(split_cli_opts "$1") || return 0
+    printf 'CLI_OPTS is split into:\n%s\n' "$output"
+    return 1
+}
+
+# Succeed when exactly one openconnect runs in the container
+one_openconnect_runs() {
+    local processes
+    processes=$(in_c pgrep -a -x openconnect)
+    [ "$(grep -c . <<<"$processes")" = 1 ] && return 0
+    printf 'openconnect processes:\n%s\n' "$processes"
     return 1
 }
 
@@ -1323,12 +1400,37 @@ if [ "$vpn_type" = openconnect ]; then
     check "test gateway is started" docker exec -d cisco-vpn python3 -c "$gateway_server" "$test_gateway_cert"
     check "login URL is logged within 45 seconds" \
         wait_log "^\[openconnect\] open this URL in your browser to log in: $test_login_url\$" "" 45
-    # shellcheck disable=SC2086
-    check "openconnect runs with CLI_OPTS split on whitespace" openconnect_argv_is openconnect --protocol=anyconnect \
-        --external-browser="$login_url_printer" $test_cli_opts "$test_gateway"
+    check "openconnect runs with the arguments of CLI_OPTS, the quoted one whole, and --interface=$vpn_tun" \
+        openconnect_argv_is openconnect --protocol=anyconnect --external-browser="$login_url_printer" \
+        --cafile="$test_gateway_cert" "--useragent=smoke test agent" --interface="$vpn_tun" "$test_gateway"
     check "openconnect writes to the login terminal" openconnect_writes_to_terminal
     check "openconnect listens for the callback on [::1]:$callback_port" callback_listener_is_openconnects
     check "host reaches openconnect's callback listener through 127.0.0.1:$callback_port" host_reaches_callback_listener
+    # run_service restarts the forward and reopens the login terminal
+    check "socat is stopped" in_c pkill -x socat
+    check "host reaches openconnect's callback listener after socat restarts" host_reaches_callback_listener
+    check "login terminal is closed" in_c pkill -x xterm
+    check "login URL is logged again after the terminal reopens" login_url_logged_times 2
+    check "one openconnect runs after the terminal reopens" one_openconnect_runs
+    check "openconnect listens for the callback after the terminal reopens" callback_listener_is_openconnects
+
+    # openconnect must use the tunnel interface that the firewall, danted and the forward use
+    echo "--- with CLI_OPTS that sets the tunnel interface ---"
+    check "container is recreated with CLI_OPTS=--interface=tun1" recreate CISCO_VPN_DATA="$test_data" PASSWORD= \
+        VNC_SIZE= SOCKS_USER= SOCKS_PASSWD= NODANTED= PING_ADDR= PING_ADDR_URL= PING_INTERVAL= \
+        VPN_SERVER="$test_gateway" CLI_OPTS=--interface=tun1
+    check "services started after recreate" wait_ready
+    check "refused CLI_OPTS is logged" wait_log '^\[start\] error: CLI_OPTS sets the tunnel interface'
+    check "login terminal waits without openconnect" login_terminal_waits
+    check "callback port is not forwarded" callback_port_is_not_forwarded
+    for opts in "-i tun1" -itun1 "--interface tun1" --inter=tun1 "-bi tun1"; do
+        check "CLI_OPTS=$opts sets the tunnel interface" cli_opts_set_interface "$opts"
+    done
+    check "CLI_OPTS=-uivan does not set the tunnel interface" cli_opts_split_into -uivan -uivan
+    check "CLI_OPTS is split as bash splits a command line" cli_opts_split_into \
+        "--useragent='AnyConnect Linux_64 5.1.20.333' x\\ y \"-u\" ivan # comment" \
+        "--useragent=AnyConnect Linux_64 5.1.20.333" "x y" -u ivan
+    check "CLI_OPTS with an unmatched quote cannot be split" cli_opts_cannot_be_split "--useragent='a b"
 fi
 
 # A passwd.new left next to the password file must not decide the new file's mode
