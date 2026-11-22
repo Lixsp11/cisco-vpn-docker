@@ -16,9 +16,9 @@
 # it with PING_ADDR set to an address that does not answer, with PING_ADDR and PING_ADDR_URL set to the
 # container's own address and a web server that the checks start in it (and restarts it, then stops it while a
 # keepalive request waits for a server that never answers), with PING_INTERVAL empty and with a PING_INTERVAL of
-# 0. Then it
-# checks the persistent home directory: it changes a preference and recreates the container again, recreates
-# it with PASSWORD and VNC_SIZE set, once more with both empty and once with a PASSWORD of two lines, once with
+# 0. It recreates it with VPN_SERVER set, checks the client profile and restarts it, and with a VPN_SERVER that
+# is not a host name. Then it checks the persistent home directory: it writes a preference file of the user's
+# and recreates the container again, recreates it with PASSWORD and VNC_SIZE set, once more with both empty and once with a PASSWORD of two lines, once with
 # another PASSWORD that cannot be written because the VNC password's directory is read-only, and finally
 # recreates it on the configured data directory.
 # The test data directory and the copies of the files compared across a recreate are removed before the
@@ -44,6 +44,12 @@ saved_vnc_passwd=$repo/tmp/smoke-vnc-passwd
 long_password="p@ss w0rd!$(printf '%0245d' 0)xyz"
 # The second line of a password must not become a view-only password either
 two_line_password=$'pw1\npw2'
+# Client profile that the container writes from VPN_SERVER, the profile directory's listing with it and without
+# it, and the gateway address of the checks (a reserved example domain)
+csc_profile=/opt/cisco/secureclient/vpn/profile/cisco-vpn-docker.xml
+profile_dir_with_profile=$'AnyConnectProfile.xsd\ncisco-vpn-docker.xml'
+profile_dir_without_profile=AnyConnectProfile.xsd
+test_server=vpn.example.com
 # Address of the documentation range (TEST-NET-1) that no host answers, for the keepalive's failed pings
 unreachable_addr=192.0.2.1
 # Web server that the keepalive checks start in the container for PING_ADDR_URL, and the file of its request log
@@ -105,6 +111,42 @@ with socket.create_connection(("127.0.0.1", 5901), timeout=5) as sock:
 EOF
 )
 
+# Checks the client profile argv[1] against argv[2]. The profile must have exactly the structure that the
+# container writes, which was validated against the client's AnyConnectProfile.xsd: ClientInitialization with
+# LocalLanAccess true and UserControllable true, and a ServerList with one HostEntry whose HostName and
+# HostAddress are argv[2]. Exits with a message on the first difference.
+profile_check=$(
+    cat <<'EOF'
+import sys
+import xml.etree.ElementTree as ET
+
+NS = "{http://schemas.xmlsoap.org/encoding/}"
+
+
+def tags(element):
+    return [child.tag.replace(NS, "") for child in element]
+
+
+root = ET.parse(sys.argv[1]).getroot()
+if root.tag != NS + "AnyConnectProfile":
+    sys.exit(f"root element is {root.tag}")
+if tags(root) != ["ClientInitialization", "ServerList"]:
+    sys.exit(f"profile has {tags(root)}")
+init, servers = root
+if tags(init) != ["LocalLanAccess"]:
+    sys.exit(f"ClientInitialization has {tags(init)}")
+if init[0].text != "true" or init[0].attrib != {"UserControllable": "true"}:
+    sys.exit(f"LocalLanAccess is {init[0].text!r} with {init[0].attrib}")
+if tags(servers) != ["HostEntry"]:
+    sys.exit(f"ServerList has {tags(servers)}")
+if tags(servers[0]) != ["HostName", "HostAddress"]:
+    sys.exit(f"HostEntry has {tags(servers[0])}")
+name, address = servers[0]
+if name.text != sys.argv[2] or address.text != sys.argv[2]:
+    sys.exit(f"HostEntry has {name.text!r} and {address.text!r}")
+EOF
+)
+
 # start.sh writes a utmp USER_PROCESS record so that vpnagentd can find the user running vpnui.
 # The record must have user vpnuser, line :1, and a PID on vpnui's parent chain below PID 1.
 # The PID field of utmpdump is zero-padded and the user and line fields are space-padded.
@@ -138,6 +180,54 @@ recreate() {
 # Wait until vpnui (csc_ui) of the container's current start has logged the preferences it read
 wait_prefs_logged() {
     wait_log 'csc_ui\[[0-9]+\]: .*Current Preference Settings'
+}
+
+# Succeed when the client profile in the container is a regular file of root's with mode 644 that lists the
+# gateway $1 and turns on local LAN access
+profile_lists() {
+    local file_info
+    file_info=$(in_c stat -c '%F %U:%G %a' "$csc_profile") || return 1
+    if [ "$file_info" != "regular file root:root 644" ]; then
+        echo "client profile is: $file_info"
+        return 1
+    fi
+    in_c python3 -c "$profile_check" "$csc_profile" "$1"
+}
+
+# Succeed when the profile directory in the container holds exactly the files $1, one per line, so also no
+# temporary file of the profile
+profile_dir_holds() {
+    local files
+    files=$(in_c ls -A "$(dirname "$csc_profile")") || return 1
+    [ "$files" = "$1" ] && return 0
+    printf 'the profile directory holds:\n%s\n' "$files"
+    return 1
+}
+
+# Succeed when the entrypoint logged no line about VPN_SERVER since the container's current start
+nothing_logged_about_vpn_server() {
+    local since lines
+    since=$(docker inspect -f '{{.State.StartedAt}}' cisco-vpn) || return 1
+    lines=$(docker logs --since "$since" cisco-vpn 2>&1 | grep '^\[start\].*VPN_SERVER')
+    [ -z "$lines" ] && return 0
+    printf '%s\n' "$lines"
+    return 1
+}
+
+# Write a preference file of the user's to the container, as vpnuser and in the client's own format: it names
+# a gateway and turns LocalLanAccess off
+write_user_prefs() {
+    # The single-quoted script is expanded by the sh that runs it
+    # shellcheck disable=SC2016
+    docker exec -i cisco-vpn setpriv --reuid=vpnuser --regid=vpnuser --init-groups \
+        sh -c 'mkdir -p "$(dirname "$1")" && cat >"$1"' sh "/home/vpnuser/$prefs" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<AnyConnectPreferences>
+<DefaultHostName>$test_server</DefaultHostName>
+<ControllablePreferences>
+<LocalLanAccess>false</LocalLanAccess></ControllablePreferences>
+</AnyConnectPreferences>
+EOF
 }
 
 # Succeed when Xtigervnc in the container runs with -geometry $1
@@ -482,7 +572,6 @@ run_checks() {
     check "HTTP proxy works" curl -fsS -o /dev/null --noproxy '' -x http://127.0.0.1:8888 https://deb.debian.org/
     check "only NET_ADMIN and SYS_ADMIN are added" sh -c '[ "$(docker inspect -f "{{.HostConfig.CapAdd}}" cisco-vpn)" = "[CAP_NET_ADMIN CAP_SYS_ADMIN]" ]'
     check "vpnui logged its preferences" wait_prefs_logged
-    check "preferences allow local LAN access by default" local_lan_access_is true
     check "vpnuser can write its home" in_c setpriv --reuid=vpnuser --regid=vpnuser --init-groups \
         sh -c 'touch /home/vpnuser/.write-test && rm /home/vpnuser/.write-test'
     check "default VNC size is 1280x720" vnc_size_is 1280x720
@@ -549,11 +638,13 @@ check "no temporary tunnel interface is left" in_c sh -c '! ip link show cscotun
 echo "--- on an empty data directory ---"
 check "test data directory is removed" rm -rf "$test_data" "$edited_prefs" "$saved_vnc_passwd"
 check "container is recreated on the test data directory" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
-    SOCKS_USER= SOCKS_PASSWD= NODANTED=
+    SOCKS_USER= SOCKS_PASSWD= NODANTED= VPN_SERVER=
 check "services started after recreate" wait_ready
 run_checks
 run_socks5_checks
-check "default preferences are in the test data directory" test -f "$test_data/$prefs"
+check "no client profile is written without VPN_SERVER" profile_dir_holds "$profile_dir_without_profile"
+check "missing VPN_SERVER warning is logged" wait_log '^\[start\] warning: VPN_SERVER is not set'
+check "vpnui reads LocalLanAccess: false without a profile" local_lan_access_is false
 check "VNC password file holds the default password" vnc_passwd_holds password
 check "default VNC password warning is logged" wait_log '^\[start\] warning: PASSWORD is not set'
 check "VNC accepts the default password" vnc_accepts password
@@ -690,19 +781,44 @@ check "services started after recreate" wait_ready
 check "refused PING_INTERVAL is logged" wait_log '^\[start\] error: PING_INTERVAL is not a whole number of seconds above 0'
 check "keepalive does not run" keepalive_is_off
 
-# A preference file that already exists holds the user's choices and must be kept as a whole:
-# the edit turns LocalLanAccess off and adds a gateway address, and the file is compared byte for byte
-echo "--- with a preference changed by the user ---"
-check "LocalLanAccess is changed to false and a gateway is added" in_c setpriv --reuid=vpnuser --regid=vpnuser --init-groups \
-    sh -c "sed -i -e 's#<LocalLanAccess>true</LocalLanAccess>#<LocalLanAccess>false</LocalLanAccess>#' -e 's#^<ControllablePreferences>#<DefaultHostName>vpn.example.com</DefaultHostName>\n&#' /home/vpnuser/$prefs && grep -q '<LocalLanAccess>false</LocalLanAccess>' /home/vpnuser/$prefs && grep -q '<DefaultHostName>vpn.example.com</DefaultHostName>' /home/vpnuser/$prefs"
-check "edited preference file is copied for comparison" cp "$test_data/$prefs" "$edited_prefs"
-check "container is recreated on the test data directory" recreate CISCO_VPN_DATA="$test_data"
+# The profile turns on local LAN access for the gateway VPN_SERVER, and vpnui reads the setting from it.
+# docker restart keeps the container's files, so the restart replaces the profile of the first start.
+echo "--- with VPN_SERVER set ---"
+check "container is recreated with VPN_SERVER=$test_server" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
+    SOCKS_USER= SOCKS_PASSWD= NODANTED= PING_ADDR= PING_ADDR_URL= PING_INTERVAL= VPN_SERVER="$test_server"
+check "services started after recreate" wait_ready
+check "client profile lists VPN_SERVER and turns on local LAN access" profile_lists "$test_server"
+check "profile directory holds only the schema and the client profile" profile_dir_holds "$profile_dir_with_profile"
+check "vpnagentd loaded the client profile" wait_log 'csc_vpnagent\[[0-9]+\]: .*Loaded profiles: .*/cisco-vpn-docker\.xml'
+check "vpnui loaded the client profile" wait_log 'csc_ui\[[0-9]+\]: .*Loaded profiles: .*/cisco-vpn-docker\.xml'
+check "vpnui logged its preferences" wait_prefs_logged
+check "vpnui reads LocalLanAccess: true from the profile" local_lan_access_is true
+check "nothing is logged about VPN_SERVER" nothing_logged_about_vpn_server
+check "container restarts" docker restart cisco-vpn
+check "services started after restart" wait_ready
+check "client profile lists VPN_SERVER after restart" profile_lists "$test_server"
+check "profile directory holds only the schema and the client profile after restart" \
+    profile_dir_holds "$profile_dir_with_profile"
+
+# The value goes into the profile's XML, so anything but a host name or an IP address is refused
+echo "--- with a VPN_SERVER that is not a host name ---"
+check "container is recreated with an invalid VPN_SERVER" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
+    SOCKS_USER= SOCKS_PASSWD= NODANTED= PING_ADDR= PING_ADDR_URL= PING_INTERVAL= VPN_SERVER='vpn.example.com"/><x'
+check "services started after recreate" wait_ready
+check "refused VPN_SERVER is logged" wait_log '^\[start\] error: VPN_SERVER is not a host name or an IP address'
+check "no client profile is written for an invalid VPN_SERVER" profile_dir_holds "$profile_dir_without_profile"
+
+# A preference file of the user's is kept as a whole, and its choice wins over the profile's: the file turns
+# LocalLanAccess off and names a gateway, and it is compared byte for byte after a recreate with VPN_SERVER set
+echo "--- with a preference file of the user's ---"
+check "preference file with LocalLanAccess false and a gateway is written" write_user_prefs
+check "preference file is copied for comparison" cp "$test_data/$prefs" "$edited_prefs"
+check "container is recreated with VPN_SERVER" recreate CISCO_VPN_DATA="$test_data" VPN_SERVER="$test_server"
 check "services started after recreate" wait_ready
 # cmp fails when either file is missing
-check "edited preference file is unchanged" cmp "$edited_prefs" "$test_data/$prefs"
-check "changed preference is kept in the file" grep -q '<LocalLanAccess>false</LocalLanAccess>' "$test_data/$prefs"
+check "preference file is unchanged" cmp "$edited_prefs" "$test_data/$prefs"
 check "vpnui logged its preferences" wait_prefs_logged
-check "vpnui reads the changed preference" local_lan_access_is false
+check "vpnui reads the user's LocalLanAccess: false over the profile's" local_lan_access_is false
 
 # A passwd.new left next to the password file must not decide the new file's mode
 echo "--- with PASSWORD and VNC_SIZE set ---"

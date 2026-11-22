@@ -3,8 +3,7 @@
 #   VPN_TUN      the tunnel interface of the client
 #   vpn_prepare  preparation before any service starts
 #   vpn_start    starts the client processes with start.sh's run_service
-# Uses log, run_service, VPN_USER and DISPLAY from start.sh; vpn_prepare runs after start.sh has given
-# the home directory to VPN_USER.
+# Uses log, run_service, VPN_USER and DISPLAY from start.sh, and VPN_SERVER from the environment.
 
 # Tunnel interface that the Cisco client creates when it connects; start.sh uses it
 # shellcheck disable=SC2034
@@ -12,21 +11,56 @@ VPN_TUN=cscotun0
 
 CSC_BIN=/opt/cisco/secureclient/bin
 
-# Give the GUI user default preferences when it has no preference file yet; an existing file holds
-# the user's own choices and is left alone. vpnui reads its preferences from ~/.vpn/.anyconnect
-# (found with strace) and logs the values it read as "Current Preference Settings".
-# The default turns on "Allow local (LAN) access" so that the host can still reach the container's ports
-# while the tunnel is up; otherwise Cisco's firewall drops new connections from the local network.
-# The gateway must allow local LAN access as well:
+# Client profile that write_profile writes; the client loads every profile in this directory
+CSC_PROFILE=/opt/cisco/secureclient/vpn/profile/cisco-vpn-docker.xml
+
+# Write a client profile that lists the gateway VPN_SERVER and turns on "Allow local (LAN) access", so that the
+# host can still reach the container's ports while the tunnel is up; otherwise Cisco's firewall drops new
+# connections from the local network. vpnagentd takes this setting at connect time from the profile whose server
+# list holds the gateway, or from the Cisco window when the user changes the checkbox there; it does not read the
+# GUI user's preference file ~/.vpn/.anyconnect. Observed in testing: with only that file set, the connection log
+# shows "IPv4 Local LAN Wildcard: local LAN access preference is disabled", and with this profile
+# "IPv4 Local LAN Wildcard: received". The profile setting is Cisco's own way to turn local LAN access on:
 # https://www.cisco.com/c/en/us/support/docs/security/secure-client-5/221024-configure-local-lan-access-for-secure-cl.html
-# The copy runs as the GUI user, so what it creates is the user's, and links inside the volume can only
-# lead it where that user may write anyway. cp -n creates the file exclusively and never replaces one.
-# The home directory must already belong to the GUI user (start.sh's prepare_home).
-seed_preferences() {
-    # The single-quoted script is expanded by the sh that runs it
-    # shellcheck disable=SC2016
-    setpriv --reuid="$VPN_USER" --regid="$VPN_USER" --init-groups \
-        sh -c 'mkdir -p "$1" && cp -n /etc/skel-vpnuser/.vpn/.anyconnect "$1/.anyconnect"' sh "/home/$VPN_USER/.vpn"
+# The gateway must allow local LAN access as well. UserControllable keeps the checkbox in the Cisco window, so
+# the user can still turn local LAN access off.
+# VPN_SERVER may contain only letters, digits, dots, hyphens and colons, as host names and IPv4 and IPv6 addresses
+# do, so it cannot change the XML around it. The profile goes to a new file that replaces the old one once it is
+# complete. It is in the image's file system, not in the data directory, so each container writes its own.
+write_profile() {
+    local new
+    if [ -z "${VPN_SERVER:-}" ]; then
+        log "warning: VPN_SERVER is not set, so no client profile turns on local LAN access; once the VPN is" \
+            "connected, the host cannot reach noVNC or the proxies unless \"Allow local (LAN) access\" is turned on" \
+            "in the Cisco window"
+        return
+    fi
+    if ! [[ $VPN_SERVER =~ ^[A-Za-z0-9.:-]{1,253}$ ]]; then
+        log "error: VPN_SERVER is not a host name or an IP address; no client profile is written, so once the VPN" \
+            "is connected, the host cannot reach noVNC or the proxies"
+        return
+    fi
+    if new=$(mktemp "$CSC_PROFILE.XXXXXX") &&
+        cat >"$new" <<EOF &&
+<?xml version="1.0" encoding="UTF-8"?>
+<AnyConnectProfile xmlns="http://schemas.xmlsoap.org/encoding/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://schemas.xmlsoap.org/encoding/ AnyConnectProfile.xsd">
+  <ClientInitialization>
+    <LocalLanAccess UserControllable="true">true</LocalLanAccess>
+  </ClientInitialization>
+  <ServerList>
+    <HostEntry>
+      <HostName>$VPN_SERVER</HostName>
+      <HostAddress>$VPN_SERVER</HostAddress>
+    </HostEntry>
+  </ServerList>
+</AnyConnectProfile>
+EOF
+        chmod 644 "$new" && mv -f "$new" "$CSC_PROFILE"; then
+        return
+    fi
+    rm -f "$new"
+    log "error: cannot write the client profile $CSC_PROFILE; once the VPN is connected, the host cannot reach" \
+        "noVNC or the proxies"
 }
 
 vpn_prepare() {
@@ -46,7 +80,7 @@ vpn_prepare() {
         fi
     done
 
-    seed_preferences
+    write_profile
 }
 
 # vpnagentd verifies the server certificate as the logged-in user running the GUI and refuses to do so as root;

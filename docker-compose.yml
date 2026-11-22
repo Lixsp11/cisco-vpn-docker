@@ -18,6 +18,11 @@ services:
       net.ipv4.ip_forward: 1
     # Set these in .env next to this file or in the environment of docker compose; empty means the default
     environment:
+      # Address of the VPN gateway, a host name or an IP address. The container writes a Cisco client profile
+      # for it that turns on "Allow local (LAN) access", so that the host can still reach noVNC and the proxies
+      # once the VPN is connected. Without it, a warning is logged and that access is off until turned on in the
+      # Cisco window.
+      VPN_SERVER: ${VPN_SERVER:-}
       # VNC password (only the first 8 characters of its first line count; empty keeps the saved one, and
       # without a saved one the password is "password") and window size (default 1280x720)
       PASSWORD: ${PASSWORD:-}
