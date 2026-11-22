@@ -934,10 +934,11 @@ callback_listener_is_openconnects() {
 }
 
 # Succeed when the host gets openconnect's answer to a request that is not a callback, 404 Not Found, from
-# http://127.0.0.1:29786/
+# http://127.0.0.1:29786/callback-test. openconnect closes the connection without an answer when the request line is
+# shorter than 15 characters, as "GET / HTTP/1.1" is (handle_external_browser in hpke.c of openconnect 9.01).
 host_reaches_callback_listener() {
     local code
-    code=$(curl -sS -o /dev/null -w '%{http_code}' --noproxy '' --max-time 5 "http://127.0.0.1:$callback_port/")
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --noproxy '' --max-time 5 "http://127.0.0.1:$callback_port/callback-test")
     [ "$code" = 404 ] && return 0
     echo "the host got the status $code"
     return 1
