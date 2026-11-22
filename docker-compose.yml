@@ -7,23 +7,24 @@ services:
     cap_add:
       # Tunnel interface, routes and the container's firewall rules; without it the container stops at startup
       - NET_ADMIN
-      # Needed to unmount the bind-mounted /etc/resolv.conf and /etc/hosts at startup,
+      # Cisco variant: needed to unmount the bind-mounted /etc/resolv.conf and /etc/hosts at startup,
       # so that vpnagentd can replace them when it sets up VPN DNS
       - SYS_ADMIN
     devices:
-      # The Cisco client creates its tunnel interface through /dev/net/tun
+      # The VPN client creates its tunnel interface through /dev/net/tun
       - /dev/net/tun:/dev/net/tun
     sysctls:
       # Route mode: the container forwards packets between the host and the VPN tunnel
       net.ipv4.ip_forward: 1
     # Set these in .env next to this file or in the environment of docker compose; empty means the default
     environment:
-      # Address of the VPN gateway, a host name or an IP address. The container writes a Cisco client profile
-      # for it that turns on "Allow local (LAN) access", so that the host can still reach noVNC and the proxies
-      # once the VPN is connected. Without it, a warning is logged and that access is off until turned on in the
-      # Cisco window.
+      # Address of the VPN gateway. openconnect variant: required; openconnect connects to it.
+      # Cisco variant: a host name or an IP address. The container writes a Cisco client profile for it that turns
+      # on "Allow local (LAN) access", so that the host can still reach noVNC and the proxies once the VPN is
+      # connected. Without it, a warning is logged and that access is off until turned on in the Cisco window.
       VPN_SERVER: ${VPN_SERVER:-}
-      # openconnect image: extra arguments of openconnect, split as bash splits a command line (quotes keep spaces)
+      # openconnect variant: extra arguments of openconnect, split as bash splits a command line (quotes keep
+      # spaces); arguments that set the tunnel interface are refused
       CLI_OPTS: ${CLI_OPTS:-}
       # VNC password (only the first 8 characters of its first line count; empty keeps the saved one, and
       # without a saved one the password is "password") and window size (default 1280x720)
@@ -45,10 +46,10 @@ services:
       - "127.0.0.1:6080:6080"   # noVNC
       - "127.0.0.1:1080:1080"   # SOCKS5
       - "127.0.0.1:8888:8888"   # HTTP
-      - "127.0.0.1:29786:29786" # openconnect image: the browser's return to openconnect after a single sign-on
+      - "127.0.0.1:29786:29786" # openconnect variant: the browser's return to openconnect after a single sign-on
     volumes:
-      # Home directory of the GUI user: the Cisco user preferences (.vpn/.anyconnect), the VNC password
-      # (.vnc/passwd) and anything else the Cisco client and its login window save there
+      # Home directory of vpnuser: the VNC password (.vnc/passwd), and in the Cisco variant the Cisco user
+      # preferences (.vpn/.anyconnect) and anything else the Cisco client and its login window save there
       - ${CISCO_VPN_DATA:-${HOME}/.cisco-vpn-data}:/home/vpnuser
     mem_limit: 600m
     memswap_limit: 1200m

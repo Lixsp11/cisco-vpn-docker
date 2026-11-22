@@ -15,26 +15,35 @@
 
 ## Build
 
-Put your Cisco Secure Client VPN package for Linux (the full package with the GUI) in `packages/`. The build argument `CSC_DEB` names the file, and its default is `cisco-secure-client-vpn_5.1.20.333_amd64.deb`. apt installs the package and its dependencies in a `debian:bookworm-slim` image.
+The image is built on `debian:bookworm-slim`. Before anything is installed, the build chooses the VPN client from the `.deb` files in `packages/` and writes it, `cisco` or `openconnect`, to `/etc/vpn-type`, which the entrypoint and `diag.sh` read. The build log shows the choice, as `VPN client: cisco, from packages/<file>` or `VPN client: openconnect, since packages/ holds no .deb file`.
 
-With the default file name:
+- **Cisco variant.** Put your Cisco Secure Client VPN package for Linux (the full package with the GUI) in `packages/`, named `cisco-secure-client-vpn_<version>_amd64.deb`. apt installs it with its dependencies and WebKitGTK for its login window.
+- **openconnect variant.** When `packages/` holds no `.deb` file and the build argument `CSC_DEB` is empty, apt installs openconnect, xterm and socat instead. The image contains no Cisco software and no browser.
+
+The build argument `CSC_DEB` names the Cisco package to install, as the name of a file in `packages/` without a directory. It is empty by default, and then the build installs the only package in `packages/`. The build fails, and says why, when:
+
+- a `.deb` file in `packages/` is not named `cisco-secure-client-vpn_<version>_amd64.deb` or is not directly in `packages/`, also when `CSC_DEB` is set. Hidden files, files in subdirectories and names that end in `.DEB` or another letter case count as `.deb` files;
+- `packages/` holds several Cisco packages and `CSC_DEB` is empty;
+- `CSC_DEB` contains a `/` or names no `.deb` file in `packages/`.
+
+With one Cisco package in `packages/`, or none for the openconnect variant:
 
 ```bash
 docker compose up -d --build
 ```
 
-With another file name, pass the build argument each time you build:
+With several Cisco packages, pass the build argument each time you build:
 
 ```bash
 docker compose build --build-arg CSC_DEB=cisco-secure-client-vpn_<version>_amd64.deb
 docker compose up -d
 ```
 
-The image is `cisco-vpn-docker:dev` and the container is `cisco-vpn`.
+Both variants build the image `cisco-vpn-docker:dev` and run as the container `cisco-vpn`. To change the variant, add or remove the package and build again.
 
 ### Building in GitHub Actions
 
-The workflow `.github/workflows/build.yml` builds the image and pushes it to the GitHub container registry (ghcr.io). It runs only when started by hand, from the Actions tab or with `gh workflow run build.yml`. Set the secret and the variable in the repository settings, under Secrets and variables > Actions:
+The workflow `.github/workflows/build.yml` builds the image and pushes it to the GitHub container registry (ghcr.io). It builds only the Cisco variant: it downloads the package from `CSC_DEB_URL` and passes its file name as `CSC_DEB`. It runs only when started by hand, from the Actions tab or with `gh workflow run build.yml`. Set the secret and the variable in the repository settings, under Secrets and variables > Actions:
 
 | Name | Kind | Value |
 |---|---|---|
@@ -51,7 +60,8 @@ Set the variables in a `.env` file next to `docker-compose.yml`, or in the envir
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `VPN_SERVER` | empty | Address of the VPN gateway: a host name (labels of up to 63 letters, digits and hyphens, at most 253 characters) or an IPv4 or IPv6 address. The container writes a Cisco client profile for it that turns on "Allow local (LAN) access", so that the host can still reach noVNC and the proxies once the VPN is connected. See the [FAQ](#how-is-allow-local-lan-access-turned-on-and-what-if-the-gateway-does-not-allow-it). When `VPN_SERVER` is empty, a warning is logged. A value that is neither a host name nor an IP address is refused, and an error is logged. In both cases the container writes no profile. |
+| `VPN_SERVER` | empty | Address of the VPN gateway.<br>**Cisco variant:** optional. A host name (labels of up to 63 letters, digits and hyphens, at most 253 characters) or an IPv4 or IPv6 address. The container writes a Cisco client profile for it that turns on "Allow local (LAN) access", so that the host can still reach noVNC and the proxies once the VPN is connected. See the [FAQ](#how-is-allow-local-lan-access-turned-on-and-what-if-the-gateway-does-not-allow-it). When `VPN_SERVER` is empty, a warning is logged. A value that is neither a host name nor an IP address is refused, and an error is logged. In both cases the container writes no profile.<br>**openconnect variant:** required. openconnect connects to it: it is the last argument of openconnect's command line (see [openconnect arguments](#openconnect-arguments-cli_opts)). When it is empty, an error is logged and openconnect is not started. |
+| `CLI_OPTS` | empty | openconnect variant: extra arguments of openconnect, such as `--user=<name>` or `--authgroup=<group>`. See [openconnect arguments](#openconnect-arguments-cli_opts). The Cisco variant does not use it. |
 | `PASSWORD` | `password` when no password is saved | VNC password. Only the first 8 characters of its first line count. When empty, the saved password is kept. When empty and no password is saved, the password is `password` and a warning is logged. |
 | `VNC_SIZE` | `1280x720` | Size of the VNC display, as `<width>x<height>` |
 | `SOCKS_USER`, `SOCKS_PASSWD` | empty | When both are set, the SOCKS5 proxy requires this username and password. See [SOCKS5 username and password](#socks5-username-and-password). |
@@ -64,6 +74,26 @@ Set the variables in a `.env` file next to `docker-compose.yml`, or in the envir
 A saved VNC password stays in the data directory, so `PASSWORD` can be removed from `.env` after the first start.
 
 The names and meanings match docker-easyconnect. Its other variables, such as `EXIT`, `MAX_RETRY`, `URLWIN`, `CLIP_TEXT`, `TYPE` and `FORWARD`, are not supported.
+
+### openconnect arguments (`CLI_OPTS`)
+
+The openconnect variant runs openconnect with these arguments:
+
+```
+openconnect --protocol=anyconnect --external-browser=/usr/local/bin/print-login-url.sh --interface=tun0 <arguments of CLI_OPTS> -- <VPN_SERVER>
+```
+
+- The container splits `CLI_OPTS` into arguments as bash splits a command line, as docker-easyconnect does: quotes and backslashes keep spaces in an argument, `$` expansions are made, and `#` starts a comment. Patterns such as `*` are not expanded. For example, `--useragent="AnyConnect Linux_64 5.1.20.333" --authgroup=Staff` gives the two arguments `--useragent=AnyConnect Linux_64 5.1.20.333` and `--authgroup=Staff`.
+- In `.env`, Compose reads the value first, by its [`.env` syntax](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/#env-file-syntax). It uses a single-quoted value literally:
+
+  ```
+  CLI_OPTS='--useragent="AnyConnect Linux_64 5.1.20.333" --authgroup=Staff'
+  ```
+
+- As in docker-easyconnect, bash evaluates the value, so a command substitution in it runs as root in the container. `CLI_OPTS` is your own configuration, like the compose file. A bash of its own parses it and passes back only the arguments, so it cannot change openconnect's other arguments.
+- The fixed options come first, so an option at the end of `CLI_OPTS` that takes a value cannot take one of them as its value. `--` ends the options before `VPN_SERVER`, so `CLI_OPTS` holds options only.
+- openconnect must use the tunnel interface `tun0`, which the firewall, the NAT of route mode and the SOCKS5 proxy expect. A `CLI_OPTS` that sets the interface with `-i` or `--interface`, also abbreviated as in `--inter=tun1`, is refused. Do not set the interface in an openconnect configuration file (`--config`) either: the container does not check such a file, and its setting comes after `--interface=tun0` and replaces it.
+- When `VPN_SERVER` is empty, or `CLI_OPTS` sets the interface or cannot be split (for example because of an unmatched quote), the log shows `[start] error: <reason>; openconnect is not started until that is changed and the container is recreated`. The terminal window shows the reason and waits, and port 29786 is not forwarded.
 
 ### Example compose file
 
@@ -84,27 +114,50 @@ The names and meanings match docker-easyconnect. Its other variables, such as `E
 | 6080 | noVNC (websockify) | `/` and `/vnc.html` open the VNC client |
 | 1080 | SOCKS5 (dante) | |
 | 8888 | HTTP proxy (tinyproxy) | |
+| 29786 | The browser's return to openconnect after single sign-on (openconnect variant) | Forwarded to openconnect, which listens on `[::1]:29786` in the container while it waits for the browser. See the [FAQ](#where-does-port-29786-come-from). The Cisco variant does not use it. |
 | 5901 | VNC (Xtigervnc) | Listens only inside the container and is not published |
 
-The proxies accept any client that reaches their port. SOCKS5 can require a username and password, and the HTTP proxy has no authentication. The example compose file binds the ports to `127.0.0.1`, so other machines cannot reach them through the host. From another machine, forward the ports over SSH:
+The proxies accept any client that reaches their port. SOCKS5 can require a username and password, and the HTTP proxy has no authentication. The example compose file binds the ports to `127.0.0.1`, so other machines cannot reach them through the host. From another machine, forward the ports over SSH. For single sign-on in the openconnect variant, forward port 29786 to the machine whose browser you log in with:
 
 ```bash
-ssh -N -L 127.0.0.1:6080:127.0.0.1:6080 -L 127.0.0.1:1080:127.0.0.1:1080 -L 127.0.0.1:8888:127.0.0.1:8888 user@host
+ssh -N -L 127.0.0.1:6080:127.0.0.1:6080 -L 127.0.0.1:1080:127.0.0.1:1080 -L 127.0.0.1:8888:127.0.0.1:8888 -L 127.0.0.1:29786:127.0.0.1:29786 user@host
 ```
 
 ## Logging in
+
+In both variants, `docker restart cisco-vpn` and `docker compose down` end the VPN session.
+
+### Cisco variant
 
 1. Open `http://127.0.0.1:6080/vnc.html` and enter the VNC password.
 2. In the Cisco window, enter the VPN address exactly as in `VPN_SERVER` (for example `vpn.example.com`) and click Connect.
 3. Complete the login in the window that opens. It is the Cisco client's built-in browser, so SAML single sign-on, MFA and any other step that the gateway asks for work there.
 
-The Cisco window reopens about 1 second after it is closed. When the VPN session ends or expires, log in again in the Cisco window. `docker restart cisco-vpn` and `docker compose down` end the VPN session.
+The Cisco window reopens about 1 second after it is closed. When the VPN session ends or expires, log in again in the Cisco window.
 
 To see the state of the connection from the host:
 
 ```bash
 docker exec cisco-vpn /opt/cisco/secureclient/bin/vpn state
 ```
+
+### openconnect variant
+
+1. Open `http://127.0.0.1:6080/vnc.html` and enter the VNC password. The terminal window titled `openconnect` runs openconnect for `VPN_SERVER`.
+2. Answer openconnect's prompts in the terminal, such as the username, password, one-time password or group.
+3. When the gateway asks for SAML single sign-on in an external browser, the terminal shows the login URL:
+
+   ```
+   Open this URL in your browser to log in:
+
+   https://vpn.example.com/...
+   ```
+
+   `docker logs cisco-vpn` shows it as well, in a line that starts with `[openconnect] open this URL in your browser to log in: `. Open the URL in a browser on the Docker host, or on the machine that forwards port 29786 over SSH (see [Ports](#ports)), and log in. The browser then opens `http://localhost:29786/api/sso/...`, which reaches openconnect in the container, and openconnect goes on in the terminal.
+
+- openconnect's messages appear only in the terminal. When openconnect exits, the terminal shows its exit code and starts it again after 10 seconds, or at once when you press Enter. When the VPN session ends, log in again in the terminal.
+- Closing the terminal ends openconnect and with it the VPN connection. The terminal reopens about 1 second later and starts a new login.
+- The openconnect variant supports username and password logins, and SAML single sign-on only on gateways that allow the external browser mode. See [Which gateways does the openconnect variant support?](#which-gateways-does-the-openconnect-variant-support)
 
 ## Proxies
 
@@ -114,7 +167,7 @@ curl -x http://127.0.0.1:8888 https://example.internal/
 ```
 
 - Each connection leaves the container the way the container's routing table sends it: through the tunnel for the addresses that the VPN routes, and otherwise directly through the host's network. The same applies before the VPN is connected.
-- The HTTP proxy resolves names inside the container. With SOCKS5, use `--socks5-hostname` (or `socks5h://`) so that names are resolved inside the container too. When the Cisco client connects, it replaces `/etc/resolv.conf` with the VPN's DNS settings, so names that only the VPN's DNS servers know resolve there.
+- The HTTP proxy resolves names inside the container. With SOCKS5, use `--socks5-hostname` (or `socks5h://`) so that names are resolved inside the container too. When the VPN connects, the client writes the VPN's DNS settings to `/etc/resolv.conf`, so names that only the VPN's DNS servers know resolve there. The Cisco client replaces the file, and openconnect's vpnc-script rewrites it in place and restores it when the VPN disconnects.
 
 ### SOCKS5 username and password
 
@@ -139,7 +192,7 @@ A non-empty `NODANTED` leaves the SOCKS5 proxy off. The HTTP proxy is not affect
 
 ### dante and the tunnel interface
 
-danted does not start when one of its external interfaces is missing, and the Cisco client creates its tunnel interface `cscotun0` only when it connects. As in [docker-easyconnect](https://github.com/docker-easyconnect/docker-easyconnect)'s `start.sh`, a temporary tun interface named `cscotun0`, with the address `10.0.0.1/32`, stands in for it while danted starts. It is removed once danted listens, so that the Cisco client can create its own. For each connection, danted then uses the address of the interface that the kernel routes the destination through (`external.rotation: route`).
+danted does not start when one of its external interfaces is missing, and the VPN client creates its tunnel interface only when it connects: `cscotun0` for the Cisco client, and `tun0` for openconnect, which the container tells to use that name. As in [docker-easyconnect](https://github.com/docker-easyconnect/docker-easyconnect)'s `start.sh`, a temporary tun interface with the tunnel interface's name and the address `10.0.0.1/32` stands in for it while danted starts. It is removed once danted listens, so that the VPN client can create its own. For each connection, danted then uses the address of the interface that the kernel routes the destination through (`external.rotation: route`).
 
 ## Route mode
 
@@ -150,17 +203,19 @@ After the VPN is connected, run on the host:
 ```bash
 # The container's IP address on the compose network
 docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' cisco-vpn
-# The MTU of the tunnel interface
+# The MTU of the tunnel interface: cscotun0 in the Cisco variant
 docker exec cisco-vpn cat /sys/class/net/cscotun0/mtu
+# The MTU of the tunnel interface: tun0 in the openconnect variant
+docker exec cisco-vpn cat /sys/class/net/tun0/mtu
 # Route a VPN subnet through the container
 sudo ip route add <VPN subnet> via <container IP> mtu <tunnel MTU>
 ```
 
-- `cscotun0` is the tunnel interface that the Cisco client creates (observed in testing). Its MTU, 1390 in testing, is smaller than the MTU of the Docker network, so the route's `mtu` makes the host send packets that fit into the tunnel.
-- `docker exec cisco-vpn ip route show table all` lists the routes in the container, including those through `cscotun0`.
+- The tunnel interface is `cscotun0`, which the Cisco client creates (observed in testing), or `tun0`, which the container tells openconnect to create. The tunnel's MTU can be smaller than the MTU of the Docker network (1390 for the Cisco client's tunnel in testing), so the route's `mtu` makes the host send packets that fit into the tunnel.
+- `docker exec cisco-vpn ip route show table all` lists the routes in the container, including those through the tunnel interface.
 - Remove a route with `sudo ip route del <VPN subnet>`. Routes added this way are lost when the host reboots, and the container's IP address can change when the container is recreated.
 - The container gives the host no DNS. In route mode the host resolves names with its own DNS servers, so for names that only the VPN's DNS servers know, use IP addresses or the proxies.
-- The Cisco client's chains, which `FORWARD` jumps to, drop forwarded packets whose source is not the tunnel's address (observed in testing). The container's accept rules for route mode therefore come first in `FORWARD`, as in this [Docker forum thread](https://forums.docker.com/t/docker-desktop-windows-and-vpn-no-network-connection-inside-container/91234). See [Firewall](#firewall).
+- In the Cisco variant, the Cisco client's chains, which `FORWARD` jumps to, drop forwarded packets whose source is not the tunnel's address (observed in testing). The container's accept rules for route mode therefore come first in `FORWARD`, as in this [Docker forum thread](https://forums.docker.com/t/docker-desktop-windows-and-vpn-no-network-connection-inside-container/91234). See [Firewall](#firewall).
 
 ## Keepalive
 
@@ -173,9 +228,11 @@ The keepalive keeps the VPN connection from being dropped as idle. It starts whe
 
 ## Persistence
 
-The compose file mounts the host directory `CISCO_VPN_DATA` (default `$HOME/.cisco-vpn-data` of the user that runs `docker compose`) at `/home/vpnuser`, the home directory of the user that runs the Cisco window. `docker compose down` and a new `docker compose up` keep it. Docker creates the directory when it does not exist, and at each start the container gives the directory itself, but not its contents, to `vpnuser` (uid and gid 1000).
+The compose file mounts the host directory `CISCO_VPN_DATA` (default `$HOME/.cisco-vpn-data` of the user that runs `docker compose`) at `/home/vpnuser`, the home directory of the user `vpnuser`, which runs the Cisco window in the Cisco variant. `docker compose down` and a new `docker compose up` keep it. Docker creates the directory when it does not exist, and at each start the container gives the directory itself, but not its contents, to `vpnuser` (uid and gid 1000).
 
-The directory holds:
+In both variants, the directory holds `.vnc/passwd`, the VNC password, owned by `vpnuser` with mode 600. In the openconnect variant, the container writes nothing else there: openconnect runs as root, and root's home directory `/root` is not in the mounted directory.
+
+In the Cisco variant, it also holds:
 
 - `.vpn/.anyconnect`: the Cisco window's user preference file. The window reads it at start (found with strace in testing) and logs the values it read as `Current Preference Settings`. The client saves the last gateway address (`DefaultHostName`) there when it connects, and the preferences that the user changes in the window (observed in testing). When the file does not exist, the container creates it with "Allow local (LAN) access" turned on, so that the window shows the setting that the [client profile](#how-is-allow-local-lan-access-turned-on-and-what-if-the-gateway-does-not-allow-it) turns on. The client uses its defaults for every other preference:
 
@@ -190,24 +247,24 @@ The directory holds:
 
   The container never changes or replaces an existing file. To go back to this default, delete the file while the container is stopped.
 - `.local/shareacwebhelper.cookies.sqlite` and `.local/shareacwebhelper/`: the cookies and the cache of the login window (observed in testing; the client names them without a `/` after `share`).
-- `.vnc/passwd`: the VNC password, owned by `vpnuser` with mode 600.
 - Anything else that the Cisco client and its login window save in the home directory.
 
 To start over, remove the container and delete the directory. The VNC password is then `password` again unless `PASSWORD` is set.
 
 ## Firewall
 
-The rules are IPv4 iptables rules in the container's own network namespace. Each one carries the comment `cisco-vpn-docker`:
+The rules are IPv4 iptables rules in the container's own network namespace. Each one carries the comment `cisco-vpn-docker`. They name the tunnel interface of the variant, `cscotun0` or `tun0`:
 
 | Table and chain | Rules | Purpose |
 |---|---|---|
-| filter `INPUT` | accept packets of established and related connections, then drop new TCP connections from `cscotun0` | Machines on the VPN side cannot open TCP connections to the container's services. As in docker-easyconnect's `config_vpn_iptables`. |
-| filter `FORWARD` | accept packets from `eth0` to `cscotun0`, and packets of established and related connections back | [Route mode](#route-mode) |
-| nat `POSTROUTING` | masquerade what leaves through `cscotun0` | Route mode, as in docker-easyconnect's `config_vpn_iptables` |
+| filter `INPUT` | accept packets of established and related connections, then drop new TCP connections from the tunnel interface | Machines on the VPN side cannot open TCP connections to the container's services. As in docker-easyconnect's `config_vpn_iptables`. |
+| filter `FORWARD` | accept packets from `eth0` to the tunnel interface, and packets of established and related connections back | [Route mode](#route-mode) |
+| nat `POSTROUTING` | masquerade what leaves through the tunnel interface | Route mode, as in docker-easyconnect's `config_vpn_iptables` |
 
-- When the Cisco client connects, it adds chains of its own and jumps to them from `INPUT` and `FORWARD` (observed in testing). Its chain for `INPUT` returns packets from the tunnel interface to `INPUT`, which would then accept them (observed in testing). The drop rule above stops new TCP connections among them.
-- The client may rebuild its chains when it connects. Every 5 seconds the container checks that its rules are the first rules of their chains, and puts them back when they are not. Each repair is logged, for example `[firewall] put the rules first in the INPUT chain of the filter table`. Only rules with the comment are ever deleted or moved.
+- In the Cisco variant, when the Cisco client connects, it adds chains of its own and jumps to them from `INPUT` and `FORWARD` (observed in testing). Its chain for `INPUT` returns packets from the tunnel interface to `INPUT`, which would then accept them (observed in testing). The drop rule above stops new TCP connections among them.
+- The Cisco client may rebuild its chains when it connects. Every 5 seconds the container checks that its rules are the first rules of their chains, and puts them back when they are not. Each repair is logged, for example `[firewall] put the rules first in the INPUT chain of the filter table`. Only rules with the comment are ever deleted or moved.
 - When the rules cannot be put in place at start, the container stops before any service starts and logs `[start] error: cannot put the firewall rules in place (the container needs the NET_ADMIN capability); stopping before any service starts`. When a later check fails, the error is logged once and the check is tried again every 5 seconds.
+- The openconnect variant adds one more rule when it starts openconnect, in nat `PREROUTING`: it redirects TCP connections to port 29786 of the container's own addresses to port 20000, where socat forwards them to openconnect (see the [FAQ](#where-does-port-29786-come-from)). This rule has no comment, and the 5-second check does not cover it.
 - There are no IPv6 rules. The container's services listen only on IPv4 and on the IPv6 loopback address `::1`, so the VPN side cannot reach them over IPv6.
 
 ## Diagnostics
@@ -216,7 +273,10 @@ The rules are IPv4 iptables rules in the container's own network namespace. Each
 docker logs -f cisco-vpn
 ```
 
-Each line starts with the name of the service that wrote it: `[start]`, `[firewall]`, `[vnc]`, `[flwm]`, `[novnc]`, `[vpnagentd]`, `[vpnui]`, `[socks5]`, `[http]` or `[keepalive]`. `[start] all services started` means that the entrypoint has finished its startup steps, not that every service runs. A service that was not started logs why, for example an error that ends with `the SOCKS5 proxy is not started`. A service that exits is logged as `exited (code <n>), restarting in 1 second`, and the next lines show whether it keeps failing. As in [Cisco's article on Secure Client in Docker](https://www.cisco.com/c/en/us/support/docs/security/secure-client-5/223124-configure-secure-client-vpn-for-use-in.html), `vpnagentd` runs in the foreground with `-execv_instance` and is restarted when it exits, and `CSC_LOGGING_OUTPUT=STDOUT` sends the logs of `vpnagentd` and `vpnui` to `docker logs`.
+Each line starts with the name of the service that wrote it: `[start]`, `[firewall]`, `[vnc]`, `[flwm]`, `[novnc]`, `[socks5]`, `[http]` or `[keepalive]`, and also `[vpnagentd]` and `[vpnui]` in the Cisco variant, or `[openconnect]` (the terminal window and the login URL) and `[sso-callback]` (socat's forward of port 29786) in the openconnect variant. `[start] all services started` means that the entrypoint has finished its startup steps, not that every service runs. A service that was not started logs why, for example an error that ends with `the SOCKS5 proxy is not started`. A service that exits is logged as `exited (code <n>), restarting in 1 second`, and the next lines show whether it keeps failing.
+
+- In the Cisco variant, as in [Cisco's article on Secure Client in Docker](https://www.cisco.com/c/en/us/support/docs/security/secure-client-5/223124-configure-secure-client-vpn-for-use-in.html), `vpnagentd` runs in the foreground with `-execv_instance` and is restarted when it exits, and `CSC_LOGGING_OUTPUT=STDOUT` sends the logs of `vpnagentd` and `vpnui` to `docker logs`.
+- In the openconnect variant, openconnect's messages appear only in the terminal window. The login URL also goes to `docker logs`.
 
 ```bash
 docker exec cisco-vpn diag.sh
@@ -224,12 +284,12 @@ docker exec cisco-vpn diag.sh
 
 `diag.sh` prints, in one go:
 
-- the Cisco package version and `vpn state`;
+- in the Cisco variant, the Cisco package version, `vpn state`, the Cisco processes with their memory use, and the files under `/opt/cisco/secureclient` that changed after the container was created or started;
+- in the openconnect variant, the openconnect version, the processes of openconnect, xterm and socat with their memory use, and the listeners on port 29786 and on socat's port 20000;
 - the interfaces, the routes of all routing tables except `local` and `broadcast` routes, and the policy routing rules;
 - the firewall rules from `iptables-save`, and from `ip6tables-save`, `iptables-legacy-save` and `nft list ruleset` when those commands exist;
 - `/etc/resolv.conf` and its mounts, and `/dev/net/tun`;
-- the related processes with their memory use, and `free -m`;
-- the files under `/opt/cisco/secureclient` that changed after the container was created or started.
+- the other related processes (Xtigervnc, websockify, danted, tinyproxy and flwm) with their memory use, and `free -m`.
 
 The output contains the VPN's addresses, routes and DNS servers. Check it before you share it.
 
@@ -237,15 +297,28 @@ The output contains the VPN's addresses, routes and DNS servers. Check it before
 
 The scripts in `tests/` run as root on the Docker host, from any working directory, against the container `cisco-vpn` of the repository's compose file.
 
-`tests/smoke.sh` needs no VPN login. Run it after `docker compose up -d --build`:
+`tests/smoke.sh` needs no VPN login. Run it after `docker compose up -d --build`. It reads `/etc/vpn-type` in the container and runs the checks of that variant:
 
-- It restarts and recreates the container many times, which ends any VPN session. At the end it recreates the container with the configured settings.
+- It restarts and recreates the container many times, which ends any VPN session. Its recreates use the repository's compose file and the image `cisco-vpn-docker:dev`. At the end it recreates the container with the configured settings.
 - It needs internet access: the proxy checks request `https://deb.debian.org/`.
-- The first checks run on the configured container and data directory. `.env` must set none of `VNC_SIZE`, `NODANTED`, `SOCKS_USER` and `SOCKS_PASSWD`, and the saved preferences must keep "Allow local (LAN) access" turned on (`LocalLanAccess` true in `.vpn/.anyconnect`).
+- The first checks run on the configured container and data directory. `.env` must set none of `VNC_SIZE`, `NODANTED`, `SOCKS_USER` and `SOCKS_PASSWD`. In the Cisco variant, the saved preferences must keep "Allow local (LAN) access" turned on (`LocalLanAccess` true in `.vpn/.anyconnect`).
 - The cases that change the data directory use `tmp/smoke-data` in the repository, not the configured data directory.
+- In the openconnect variant, the configured container runs openconnect for the configured `VPN_SERVER`, so the tests connect to that gateway without logging in: at the first checks, at two restarts and at the final recreate. Every other recreate leaves `VPN_SERVER` empty or sets it to a test gateway that the checks start in the container. That test gateway asks for single sign-on in an external browser, and the checks of the login URL and of the forward of port 29786 use it.
 - An interrupted run can leave the container with test settings or test commands. To recreate it with the configured settings, run `docker compose up -d --force-recreate`.
 
-`tests/connected.sh` checks a real connection. Log in to the VPN in the Cisco window first. It needs root, and for the route mode check it adds one `/32` host route through the container and removes it again. The script's header lists its checks and environment variables.
+To test the openconnect variant from a checkout whose `packages/` holds a Cisco package, build it from a copy of the committed files, which hold no package, under the image name that the compose file uses. This replaces the image of the Cisco variant under that name until `docker compose build` builds it again:
+
+```bash
+rm -rf tmp/oc-context && mkdir -p tmp/oc-context
+git archive HEAD | tar -x -C tmp/oc-context
+docker build -t cisco-vpn-docker:dev tmp/oc-context
+docker compose up -d --force-recreate
+tests/smoke.sh
+```
+
+The openconnect variant has not yet been accepted with a real login on a real gateway: its tests use the test gateway in the container, and `tests/connected.sh` checks only the Cisco variant.
+
+`tests/connected.sh` checks a real connection of the Cisco variant. Log in to the VPN in the Cisco window first. It needs root, and for the route mode check it adds one `/32` host route through the container and removes it again. The script's header lists its checks and environment variables.
 
 ## FAQ
 
@@ -254,6 +327,8 @@ The scripts in `tests/` run as root on the Docker host, from any working directo
 Docker bind-mounts `/etc/resolv.conf` and `/etc/hosts` into the container. When `vpnagentd` sets up the VPN's DNS, it renames `/etc/resolv.conf` to `/etc/resolv.conf.vpnbackup` and writes a new file. A mount point cannot be renamed, so the rename fails with `EBUSY` and the connection is aborted (observed in testing). At start, the container copies the content of both files, unmounts them and writes the content back, as in the [EyeSeeTea troubleshooting notes](https://github.com/EyeSeeTea/know-how/wiki/Cisco-Secure-Client-(secureclient)-v5.1-Docker-troubleshooting) and [darrencocco/anyconnect-client](https://github.com/darrencocco/anyconnect-client).
 
 `umount` needs `SYS_ADMIN`, and that is why the container has it. Docker's default AppArmor profile allows `umount` and denies `mount` ([template](https://github.com/moby/profiles/blob/main/apparmor/template.go)). Without `SYS_ADMIN`, the log shows `[start] warning: cannot unmount /etc/resolv.conf; VPN DNS setup will fail (the container needs SYS_ADMIN)`.
+
+This step belongs to the Cisco variant. The openconnect variant unmounts nothing: openconnect's vpnc-script writes `/etc/resolv.conf` in place, which works on the mounted file. The example compose file adds `SYS_ADMIN` for both variants.
 
 `NET_ADMIN` and `/dev/net/tun` are for the tunnel interface, the routes and the firewall rules. Without `NET_ADMIN` the container stops at start (see [Firewall](#firewall)).
 
@@ -268,7 +343,7 @@ On a desktop, the display manager writes this record. The container has no displ
 
 ### Why are the WebKit sandbox and compositing turned off?
 
-The login window uses WebKitGTK. The container cannot create user namespaces, so WebKit's sandbox cannot be created, and the VNC display has no GPU. `vpnui` therefore runs with `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1` and `WEBKIT_DISABLE_COMPOSITING_MODE=1` (observed in testing). Pages in the login window run without WebKit's sandbox, so use the window only for the gateway's login.
+The Cisco client's login window uses WebKitGTK. The container cannot create user namespaces, so WebKit's sandbox cannot be created, and the VNC display has no GPU. `vpnui` therefore runs with `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1` and `WEBKIT_DISABLE_COMPOSITING_MODE=1` (observed in testing). Pages in the login window run without WebKit's sandbox, so use the window only for the gateway's login.
 
 ### How is "Allow local (LAN) access" turned on, and what if the gateway does not allow it?
 
@@ -310,6 +385,27 @@ Local LAN access is configured on the gateway, by its administrator (see the Cis
 
 A gateway can push additional Cisco modules to the client, such as the Socket Filter module in testing. The client downloads the module and installs it with `pkcon` from PackageKit, which the container does not have, so the installation fails. The VPN connection is not affected (observed in testing).
 
+### Which gateways does the openconnect variant support?
+
+openconnect asks for what the gateway's login form needs, such as the username, password, one-time password or group, in the terminal window, so the openconnect variant supports gateways that log in that way.
+
+For SAML single sign-on, the gateway tells the client in its login form whether to open the login page in a browser of the client's own (embedded) or in an external browser. openconnect runs its `--external-browser` program only when the gateway asks for the external browser (`process_auth_form` in openconnect's `library.c`), and the openconnect command line has no embedded browser. A gateway that offers single sign-on only in the embedded mode therefore makes openconnect stop with `No SSO handler` and `Failed to complete authentication`. Use the Cisco variant for such a gateway: its login window is an embedded browser.
+
+### Why does the openconnect variant have no browser?
+
+openconnect has no login window of its own. For single sign-on in the external browser mode, it starts the program that `--external-browser` names with the login URL, and waits for the browser to return to `http://localhost:29786/`. In this image that program, `print-login-url.sh`, only prints the URL, in the terminal window and in `docker logs`, so the login runs in a browser on your own machine. The image therefore needs no browser, and none is installed.
+
+### Where does port 29786 come from?
+
+After a single sign-on in the external browser mode, the browser is sent to `http://localhost:29786/api/sso/...`. openconnect listens for that request on port 29786 of the IPv6 loopback address `[::1]` only, and only while it waits for the browser (`handle_external_browser` in openconnect's `hpke.c`). The port must therefore be reachable as `localhost:29786` from the browser: the compose file publishes it on the Docker host's `127.0.0.1`, and on another machine an SSH forward of the same port reaches it (see [Ports](#ports)).
+
+A published port reaches the container's own network address, not its loopback address. As docker-easyconnect's `force_open_ports` in its `start.sh` does for the ports where its clients wait for the browser, a nat `PREROUTING` rule redirects TCP connections to port 29786 of the container's own addresses to port 20000, where socat accepts them and connects to `[::1]:29786`.
+
+- The rule matches only the container's own addresses, so route mode is not affected.
+- Only this port is forwarded, so VNC on port 5901 and the other services on the loopback address stay unreachable from outside.
+- The firewall's `INPUT` rules still drop new TCP connections from the tunnel after the redirect.
+- The rule and socat are set up only when openconnect is started, that is when `VPN_SERVER` is set and `CLI_OPTS` is accepted.
+
 ### Why is there no prebuilt image?
 
-The image contains the Cisco Secure Client, and [Cisco's software terms](https://www.cisco.com/c/en/us/about/legal/cloud-and-software/software-terms.html) do not allow providing the software to third parties. Build the image yourself from your own copy of the package.
+The image of the Cisco variant contains the Cisco Secure Client, and [Cisco's software terms](https://www.cisco.com/c/en/us/about/legal/cloud-and-software/software-terms.html) do not allow providing the software to third parties. Build the image yourself from your own copy of the package.
