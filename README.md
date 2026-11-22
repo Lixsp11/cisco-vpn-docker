@@ -35,7 +35,7 @@ The container needs the `NET_ADMIN` and `SYS_ADMIN` capabilities and `/dev/net/t
    PASSWORD=changeme
    ```
 
-3. Build and start, then wait for `[start] all services started`:
+3. Build and start. `[start] all services started` in the log means that startup has finished; the lines of each service show whether it runs or failed:
 
    ```bash
    docker compose up -d --build
@@ -45,7 +45,7 @@ The container needs the `NET_ADMIN` and `SYS_ADMIN` capabilities and `/dev/net/t
 4. The ports are bound to `127.0.0.1` on the Docker host. From another machine, forward them over SSH:
 
    ```bash
-   ssh -N -L 6080:127.0.0.1:6080 -L 1080:127.0.0.1:1080 -L 8888:127.0.0.1:8888 user@host
+   ssh -N -L 127.0.0.1:6080:127.0.0.1:6080 -L 127.0.0.1:1080:127.0.0.1:1080 -L 127.0.0.1:8888:127.0.0.1:8888 user@host
    ```
 
 5. Open `http://127.0.0.1:6080/vnc.html` and enter the VNC password.

@@ -76,7 +76,7 @@ The names and meanings match docker-easyconnect. Its other variables, such as `E
 The proxies accept any client that reaches their port. SOCKS5 can require a username and password, and the HTTP proxy has no authentication. The example compose file binds the ports to `127.0.0.1`, so other machines cannot reach them through the host. From another machine, forward the ports over SSH:
 
 ```bash
-ssh -N -L 6080:127.0.0.1:6080 -L 1080:127.0.0.1:1080 -L 8888:127.0.0.1:8888 user@host
+ssh -N -L 127.0.0.1:6080:127.0.0.1:6080 -L 127.0.0.1:1080:127.0.0.1:1080 -L 127.0.0.1:8888:127.0.0.1:8888 user@host
 ```
 
 ## Logging in
@@ -201,7 +201,7 @@ The rules are IPv4 iptables rules in the container's own network namespace. Each
 docker logs -f cisco-vpn
 ```
 
-Each line starts with the name of the service that wrote it: `[start]`, `[firewall]`, `[vnc]`, `[flwm]`, `[novnc]`, `[vpnagentd]`, `[vpnui]`, `[socks5]`, `[http]` or `[keepalive]`. `[start] all services started` is logged once every service has been started. A service that exits is logged as `exited (code <n>), restarting in 1 second`. As in [Cisco's article on Secure Client in Docker](https://www.cisco.com/c/en/us/support/docs/security/secure-client-5/223124-configure-secure-client-vpn-for-use-in.html), `vpnagentd` runs in the foreground with `-execv_instance` and is restarted when it exits, and `CSC_LOGGING_OUTPUT=STDOUT` sends the logs of `vpnagentd` and `vpnui` to `docker logs`.
+Each line starts with the name of the service that wrote it: `[start]`, `[firewall]`, `[vnc]`, `[flwm]`, `[novnc]`, `[vpnagentd]`, `[vpnui]`, `[socks5]`, `[http]` or `[keepalive]`. `[start] all services started` means that the entrypoint has finished its startup steps, not that every service runs. A service that was not started logs why, for example an error that ends with `the SOCKS5 proxy is not started`. A service that exits is logged as `exited (code <n>), restarting in 1 second`, and the next lines show whether it keeps failing. As in [Cisco's article on Secure Client in Docker](https://www.cisco.com/c/en/us/support/docs/security/secure-client-5/223124-configure-secure-client-vpn-for-use-in.html), `vpnagentd` runs in the foreground with `-execv_instance` and is restarted when it exits, and `CSC_LOGGING_OUTPUT=STDOUT` sends the logs of `vpnagentd` and `vpnui` to `docker logs`.
 
 ```bash
 docker exec cisco-vpn diag.sh
@@ -210,7 +210,7 @@ docker exec cisco-vpn diag.sh
 `diag.sh` prints, in one go:
 
 - the Cisco package version and `vpn state`;
-- the interfaces, all routing tables and the policy routing rules;
+- the interfaces, the routes of all routing tables except `local` and `broadcast` routes, and the policy routing rules;
 - the firewall rules from `iptables-save`, and from `ip6tables-save`, `iptables-legacy-save` and `nft list ruleset` when those commands exist;
 - `/etc/resolv.conf` and its mounts, and `/dev/net/tun`;
 - the related processes with their memory use, and `free -m`;
@@ -247,7 +247,7 @@ Once the VPN is connected, the Cisco client's firewall chains drop new connectio
 
 Cisco's "Allow local (LAN) access when using VPN" preference lets the local network through, when the gateway allows local LAN access as well ([Cisco documentation](https://www.cisco.com/c/en/us/support/docs/security/secure-client-5/221024-configure-local-lan-access-for-secure-cl.html)). When the gateway allows it, the connection log shows `IPv4 Local LAN Wildcard: received` (observed in testing). The container turns the preference on in the default preference file (see [Persistence](#persistence)). It is a user preference in the Cisco window's preferences (the gear icon), and an existing preference file is kept as it is.
 
-When the gateway does not allow local LAN access, the VPN still connects, but the host's new connections to ports 6080, 1080 and 8888 are dropped. The proxies and a newly opened noVNC page cannot be reached until the VPN session ends. `docker exec` does not go through the network, so it still works:
+With the preference turned off, the VPN connected, and then the host's new connections to the container were dropped (observed in testing). The proxies and a newly opened noVNC page could not be reached until the VPN session ended. A gateway that does not allow local LAN access was not tested, and what happens then depends on the gateway's policy. If the host cannot reach noVNC or the proxies after the VPN connects, look for `IPv4 Local LAN Wildcard: received` in `docker logs cisco-vpn`. That line was logged in testing when the gateway allowed local LAN access. `docker exec` does not go through the network, so it still works:
 
 ```bash
 docker exec cisco-vpn /opt/cisco/secureclient/bin/vpn state
