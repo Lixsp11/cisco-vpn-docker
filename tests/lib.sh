@@ -25,11 +25,12 @@ in_c() {
     docker exec cisco-vpn "$@"
 }
 
-# Wait up to 90 seconds for a log line that matches the extended regular expression $1 and was logged
-# since the time $2 (RFC 3339). Without $2, only lines from the container's current start count:
+# Wait up to $3 seconds (90 when $3 is empty) for a log line that matches the extended regular expression $1
+# and was logged since the time $2 (RFC 3339). Without $2, only lines from the container's current start count:
 # docker logs keeps the output of earlier starts, so the time is then State.StartedAt.
 wait_log() {
-    local pattern=$1 since=${2:-} logs deadline=$((SECONDS + 90))
+    local pattern=$1 since=${2:-} seconds=${3:-90} logs deadline
+    deadline=$((SECONDS + seconds))
     if [ -z "$since" ]; then
         since=$(docker inspect -f '{{.State.StartedAt}}' cisco-vpn) || return 1
     fi
@@ -40,7 +41,7 @@ wait_log() {
         fi
         sleep 1
     done
-    echo "no line matching '$pattern' in the logs since $since after 90 seconds"
+    echo "no line matching '$pattern' in the logs since $since after $seconds seconds"
     return 1
 }
 
