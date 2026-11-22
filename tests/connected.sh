@@ -14,8 +14,8 @@
 # has no route to that address yet. A trap deletes it when the script ends early. It is the only change to the
 # host: the host's routes, iptables rules and resolv.conf are recorded at the start and compared at the end.
 # Finally it reports, without checking, what the persistence acceptance needs to know: the gateway address that
-# the data directory and vpnui's preferences hold and the files in the data directory that changed since the
-# container started, and also the firewall's log lines since then.
+# the data directory holds and the files in it that changed since the container started, and also the
+# firewall's log lines since then.
 #
 # Environment:
 #   ECHO_URL      https URL, without a port, that answers with the client's IP address as plain text
@@ -117,12 +117,13 @@ container_runs() {
     return 1
 }
 
-# Succeed when the Cisco client's command line tool reports the state Connected
+# Succeed when the Cisco client's command line tool reports the state Connected. Its answers are the lines with
+# ">>", such as "  >> state: Disconnected"; its debug log goes to the same output.
 vpn_is_connected() {
-    local state
-    state=$(in_c timeout 30 /opt/cisco/secureclient/bin/vpn state 2>&1)
-    grep -q 'state: Connected' <<<"$state" && return 0
-    printf '%s\n' "$state"
+    local output
+    output=$(in_c timeout 30 /opt/cisco/secureclient/bin/vpn state 2>&1)
+    grep -q '>> state: Connected$' <<<"$output" && return 0
+    grep -F '>>' <<<"$output" || printf '%s\n' "$output"
     return 1
 }
 
@@ -207,10 +208,10 @@ print_lines() {
 }
 
 # Print what the persistence acceptance needs to know, without checking it: the gateway address that the data
-# directory and vpnui's preferences hold, the files in the data directory that changed since the container
-# started, and the firewall's lines since then
+# directory holds and the files in it that changed since the container started, and the firewall's lines since
+# then. vpnui's "Current Preference Settings" line has no gateway address, so only the files are searched.
 report_persistence() {
-    local data_dir started line changed
+    local data_dir started changed
     data_dir=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/home/vpnuser"}}{{.Source}}{{end}}{{end}}' \
         cisco-vpn)
     started=$(docker inspect -f '{{.State.StartedAt}}' cisco-vpn)
@@ -221,8 +222,6 @@ report_persistence() {
     fi
     print_lines "DefaultHostName in the data directory" \
         "$(grep -rIo '<DefaultHostName>[^<]*</DefaultHostName>' "$data_dir")"
-    line=$(docker logs --since "$started" cisco-vpn 2>&1 | grep "csc_ui" | grep "Current Preference Settings" | tail -1)
-    print_lines "DefaultHostName in vpnui's last preference line" "$(grep -oE 'DefaultHostName: [^ ]*' <<<"$line")"
     if [ -n "$GATEWAY" ]; then
         print_lines "files in the data directory that contain GATEWAY" "$(grep -rlIF -- "$GATEWAY" "$data_dir")"
     fi
