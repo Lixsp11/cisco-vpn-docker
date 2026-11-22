@@ -50,10 +50,12 @@ parse_cli_opts() {
     wait "$!"
 }
 
-# Succeed when the openconnect arguments $@ set the tunnel interface before a "--" that ends the options: -i, alone,
-# with its value attached or after other short options without an argument, or --interface or any abbreviation of it,
-# which getopt_long accepts since no other long option of openconnect starts with "i". The value of a short option
-# is skipped, but that of a long option given as the next argument is not, so such a value that starts with -i counts.
+# Succeed when the openconnect arguments $@ set the tunnel interface before the first "--" that is not the value of a
+# short option: with -i, alone, with its value attached or after other short options without an argument, or with
+# --interface or any abbreviation of it, which getopt_long accepts since no other long option of openconnect starts
+# with "i". The check does not know which long options take a value, so it reads the value of a long option given as
+# the next argument as an argument of its own: such a value that starts with -i counts, and a "--" there ends the
+# check, although getopt_long takes that "--" as the value and goes on reading options after it.
 sets_interface() {
     local arg options skip=
     for arg; do
@@ -90,7 +92,9 @@ sets_interface() {
 # and connects to [::1]:SSO_CALLBACK_PORT. The rule matches only the container's own addresses, so route mode is not
 # affected, and the container's own connections to its loopback addresses do not pass PREROUTING. Only this port is
 # forwarded, so the container's other services on the loopback address, such as VNC on 5901, stay unreachable from
-# outside; the firewall's INPUT rules still drop new connections from the tunnel after the redirect.
+# outside. socat listens on SSO_FORWARD_PORT on all the container's IPv4 addresses, so that port is reachable from the
+# container's network as well; it leads only to the callback. The firewall's INPUT rules drop new connections from
+# the tunnel, also after the redirect and to SSO_FORWARD_PORT.
 start_callback_forward() {
     local rule=(-p tcp --dport "$SSO_CALLBACK_PORT" -m addrtype --dst-type LOCAL -j REDIRECT --to-ports "$SSO_FORWARD_PORT")
     if ! iptables -w 5 -t nat -C PREROUTING "${rule[@]}" 2>/dev/null &&
@@ -121,9 +125,10 @@ vpn_start() {
         # The login terminal only shows the error and waits, and nothing is forwarded
         log "error: $LOGIN_ERROR; openconnect is not started until that is changed and the container is recreated"
     else
-        # The firewall, danted and the forward use VPN_TUN, so openconnect must not choose another interface. The
-        # fixed options come before the arguments of CLI_OPTS, so that an option at its end that takes a value, such
-        # as -u, cannot take one of them as its value, and "--" ends the options before VPN_SERVER.
+        # The firewall, the NAT of route mode and danted use VPN_TUN, so openconnect must not choose another
+        # interface. The fixed options come before the arguments of CLI_OPTS, so that an option at its end that takes
+        # a value, such as -u, cannot take one of them as its value; it takes the "--" instead, which otherwise ends
+        # the options before VPN_SERVER.
         OPENCONNECT_ARGS=(--protocol=anyconnect --external-browser=/usr/local/bin/print-login-url.sh
             "--interface=$VPN_TUN" "${CLI_ARGS[@]}" -- "$VPN_SERVER")
         start_callback_forward

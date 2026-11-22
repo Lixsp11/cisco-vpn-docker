@@ -2,8 +2,9 @@
 # Container entrypoint: starts VNC, noVNC, the firewall, the VPN client, the SOCKS5 and HTTP proxies and the
 # keepalive, and keeps them running. Each service's output is prefixed with [service] in docker logs.
 
-# Unprivileged user that runs the VPN client's GUI, created in the Dockerfile.
-# Its home directory is the volume that keeps the client's settings.
+# Unprivileged user, created in the Dockerfile, whose home directory is the volume that keeps the VNC password and,
+# in the Cisco variant, the client's settings. In the Cisco variant it runs the Cisco client's GUI; in the openconnect
+# variant, the login terminal runs as root.
 VPN_USER=vpnuser
 
 log() {
@@ -49,24 +50,24 @@ stop_all() {
 trap stop_all TERM INT
 
 # Docker creates the volume's host directory as root when it does not exist, so give the directory itself
-# to the GUI user, which saves its settings there. Not recursive: files that root keeps there stay root's.
+# to VPN_USER, which saves its files there. Not recursive: files that root keeps there stay root's.
 prepare_home() {
     chown "$VPN_USER:" "/home/$VPN_USER" ||
         log "warning: cannot give the data directory /home/$VPN_USER to $VPN_USER; the VPN client's settings" \
             "and the VNC password may not be saved"
 }
 
-# VNC password file, in the GUI user's home so that it is kept with the user's other settings
+# VNC password file, in VPN_USER's home directory so that it is kept in the volume
 VNC_PASSWD_FILE=/home/$VPN_USER/.vnc/passwd
 
 # Set the VNC password from PASSWORD. The password is the first 8 characters of PASSWORD's first line:
 # VncAuth uses only 8 characters, and tigervncpasswd -f, which reads a password per line of up to
 # 255 characters, would store a second password from the rest as a view-only password.
 # An empty PASSWORD keeps the saved password, and without a saved password the password is "password".
-# The GUI user writes the file, so root writes nothing below the volume; Xtigervnc, running as root, only reads it.
+# VPN_USER writes the file, so root writes nothing below the volume; Xtigervnc, running as root, only reads it.
 # The password goes to a new file from mktemp (created exclusively, mode 600) in the same directory, which
 # replaces the old file only once it is complete, so a failed write keeps the old password.
-# The home directory must already belong to the GUI user (prepare_home).
+# The home directory must already belong to VPN_USER (prepare_home).
 prepare_vnc_password() {
     local vnc_password=${PASSWORD%%$'\n'*}
     vnc_password=${vnc_password:0:8}

@@ -24,7 +24,7 @@ services:
       # connected. Without it, a warning is logged and that access is off until turned on in the Cisco window.
       VPN_SERVER: ${VPN_SERVER:-}
       # openconnect variant: extra arguments of openconnect, split as bash splits a command line (quotes keep
-      # spaces); arguments that set the tunnel interface are refused
+      # spaces); -i or --interface before its first -- is refused (doc/usage.md has the details)
       CLI_OPTS: ${CLI_OPTS:-}
       # VNC password (only the first 8 characters of its first line count; empty keeps the saved one, and
       # without a saved one the password is "password") and window size (default 1280x720)

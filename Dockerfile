@@ -39,9 +39,10 @@ RUN --mount=type=bind,source=packages,target=/tmp/packages \
     fi \
  && rm -rf /tmp/cisco-secure-client-vpn.deb /var/lib/apt/lists/*
 
-# Unprivileged user that runs the VPN client's GUI and owns the data directory (the Cisco client's vpnagentd
-# refuses to verify server certificates as root), and the system user of danted's unprivileged operations
-# (user.notprivileged in /etc/danted.conf.sample)
+# vpnuser: unprivileged user whose home directory is the data directory, which holds the VNC password. In the Cisco
+# variant it runs the Cisco client's GUI, since the client's vpnagentd refuses to verify server certificates as root;
+# in the openconnect variant, the login terminal and openconnect run as root.
+# socks: system user of danted's unprivileged operations (user.notprivileged in /etc/danted.conf.sample)
 RUN useradd -m -s /bin/bash vpnuser \
  && useradd -r -s /usr/sbin/nologin socks
 

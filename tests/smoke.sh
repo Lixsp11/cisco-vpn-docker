@@ -42,15 +42,14 @@
 # and client profile, of the unmounted resolv.conf and hosts, and of the VPN_SERVER cases above run only on the
 # Cisco image. On the openconnect image, every recreate but the final one leaves VPN_SERVER empty unless it sets
 # it, so that openconnect connects to the configured gateway only in the configured container; the checks of the
-# empty data directory also check that
-# the login terminal waits for VPN_SERVER, which is logged once, and that the callback port is not forwarded. Then
-# it recreates the container with VPN_SERVER=127.0.0.1 and CLI_OPTS set: it checks that the host reaches a test
-# listener on [::1]:29786 in the container through 127.0.0.1:29786 and cannot reach VNC on 5901, then starts a test
-# gateway in the container that asks for single sign-on in an external browser, and checks that the login URL is
-# logged, that openconnect runs with --interface=tun0 before the arguments of CLI_OPTS and listens for the callback, and
-# that the host reaches that listener, also after it stops socat and closes the login terminal. Then it recreates the
-# container with CLI_OPTS=--interface=tun1 and checks that openconnect is refused, and checks how the container
-# splits other values of CLI_OPTS and which of them set the tunnel interface.
+# empty data directory also check that the login terminal waits for VPN_SERVER, which is logged once, and that the
+# callback port is not forwarded. Then it recreates the container with VPN_SERVER=127.0.0.1 and CLI_OPTS set: it checks
+# that the host reaches a test listener on [::1]:29786 in the container through 127.0.0.1:29786 and cannot reach VNC on
+# 5901, then starts a test gateway in the container that asks for single sign-on in an external browser, and checks that
+# the login URL is logged, that openconnect runs with --interface=tun0 before the arguments of CLI_OPTS and listens for
+# the callback, and that the host reaches that listener, also after it stops socat and closes the login terminal. Then
+# it recreates the container with CLI_OPTS=--interface=tun1 and checks that openconnect is refused, and checks how the
+# container splits other values of CLI_OPTS and which of them set the tunnel interface.
 # Exits 0 when every check passes, 1 otherwise.
 
 # lib.sh is linted on its own

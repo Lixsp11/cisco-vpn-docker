@@ -20,6 +20,8 @@ The image is built on `debian:bookworm-slim`. Before anything is installed, the 
 - **Cisco variant.** Put your Cisco Secure Client VPN package for Linux (the full package with the GUI) in `packages/`, named `cisco-secure-client-vpn_<version>_amd64.deb`. apt installs it with its dependencies and WebKitGTK for its login window.
 - **openconnect variant.** When `packages/` holds no `.deb` file and the build argument `CSC_DEB` is empty, apt installs openconnect, xterm and socat instead. The image contains no Cisco software and no browser.
 
+The build mounts `packages/` only while its install step runs, as a BuildKit bind mount, so no file of `packages/`, not even the installed Cisco package, is in the image. BuildKit is the default builder of `docker build` and `docker compose build` since Docker Engine 23.0.
+
 The build argument `CSC_DEB` names the Cisco package to install, as the name of a file in `packages/` without a directory. It is empty by default, and then the build installs the only package in `packages/`. The build fails, and says why, when:
 
 - a `.deb` file in `packages/` is not named `cisco-secure-client-vpn_<version>_amd64.deb` or is not directly in `packages/`, also when `CSC_DEB` is set. Hidden files, files in subdirectories and names that end in `.DEB` or another letter case count as `.deb` files;
@@ -90,10 +92,10 @@ openconnect --protocol=anyconnect --external-browser=/usr/local/bin/print-login-
   CLI_OPTS='--useragent="AnyConnect Linux_64 5.1.20.333" --authgroup=Staff'
   ```
 
-- As in docker-easyconnect, bash evaluates the value, so a command substitution in it runs as root in the container. `CLI_OPTS` is your own configuration, like the compose file. A bash of its own parses it and passes back only the arguments, so it cannot change openconnect's other arguments.
-- The fixed options come first, so an option at the end of `CLI_OPTS` that takes a value cannot take one of them as its value. `--` ends the options before `VPN_SERVER`, so `CLI_OPTS` holds options only.
-- openconnect must use the tunnel interface `tun0`, which the firewall, the NAT of route mode and the SOCKS5 proxy expect. A `CLI_OPTS` that sets the interface with `-i` or `--interface`, also abbreviated as in `--inter=tun1`, is refused. Do not set the interface in an openconnect configuration file (`--config`) either: the container does not check such a file, and its setting comes after `--interface=tun0` and replaces it.
-- When `VPN_SERVER` is empty, or `CLI_OPTS` sets the interface or cannot be split (for example because of an unmatched quote), the log shows `[start] error: <reason>; openconnect is not started until that is changed and the container is recreated`. The terminal window shows the reason and waits, and port 29786 is not forwarded.
+- As in docker-easyconnect, bash evaluates the value as shell code, so any command in it, not only a command substitution, runs as root in the container. `CLI_OPTS` is your own configuration, like the compose file. A bash of its own parses it and passes back only the arguments, so it cannot change openconnect's other arguments.
+- The fixed options come first, so an option at the end of `CLI_OPTS` that takes a value cannot take one of them as its value. `--` ends the options before `VPN_SERVER`, so `CLI_OPTS` holds options only. An option at the end of `CLI_OPTS` that takes a value but is given none, such as `-u`, takes that `--` as its value instead.
+- openconnect must use the tunnel interface `tun0`, which the firewall, the NAT of route mode and the SOCKS5 proxy expect. The container refuses a `CLI_OPTS` that has `-i` or `--interface`, also abbreviated as in `--inter=tun1`, before its first `--`. The check does not know which long options take a value, so give long options their value with `=`, as in the examples above: a value given as the next argument is checked as an argument of its own, and a `--` there, as in `--useragent -- -i tun1`, ends the check, although openconnect takes that `--` as the value and reads `-i tun1` as an option. Do not set the interface in an openconnect configuration file (`--config`) either: the container does not check such a file, and its setting comes after `--interface=tun0` and replaces it.
+- When `VPN_SERVER` is empty, or `CLI_OPTS` is refused as above or cannot be split (for example because of an unmatched quote), the log shows `[start] error: <reason>; openconnect is not started until that is changed and the container is recreated`. The terminal window shows the reason and waits, and port 29786 is not forwarded.
 
 ### Example compose file
 
@@ -115,6 +117,7 @@ openconnect --protocol=anyconnect --external-browser=/usr/local/bin/print-login-
 | 1080 | SOCKS5 (dante) | |
 | 8888 | HTTP proxy (tinyproxy) | |
 | 29786 | The browser's return to openconnect after single sign-on (openconnect variant) | Forwarded to openconnect, which listens on `[::1]:29786` in the container while it waits for the browser. See the [FAQ](#where-does-port-29786-come-from). The Cisco variant does not use it. |
+| 20000 | socat, the forward of port 29786 to openconnect (openconnect variant) | Not published. socat listens on all the container's IPv4 addresses, so the container's network reaches it as well, and it leads only to openconnect's callback listener. The firewall drops new connections to it from the tunnel. |
 | 5901 | VNC (Xtigervnc) | Listens only inside the container and is not published |
 
 The proxies accept any client that reaches their port. SOCKS5 can require a username and password, and the HTTP proxy has no authentication. The example compose file binds the ports to `127.0.0.1`, so other machines cannot reach them through the host. From another machine, forward the ports over SSH. For single sign-on in the openconnect variant, forward port 29786 to the machine whose browser you log in with:
@@ -125,7 +128,7 @@ ssh -N -L 127.0.0.1:6080:127.0.0.1:6080 -L 127.0.0.1:1080:127.0.0.1:1080 -L 127.
 
 ## Logging in
 
-In both variants, `docker restart cisco-vpn` and `docker compose down` end the VPN session.
+In both variants, `docker restart cisco-vpn` and `docker compose down` end the VPN connection. In the openconnect variant, openconnect does not log the session off then, so the gateway may keep the session until it times out.
 
 ### Cisco variant
 
@@ -156,7 +159,7 @@ docker exec cisco-vpn /opt/cisco/secureclient/bin/vpn state
    `docker logs cisco-vpn` shows it as well, in a line that starts with `[openconnect] open this URL in your browser to log in: `. Open the URL in a browser on the Docker host, or on the machine that forwards port 29786 over SSH (see [Ports](#ports)), and log in. The browser then opens `http://localhost:29786/api/sso/...`, which reaches openconnect in the container, and openconnect goes on in the terminal.
 
 - openconnect's messages appear only in the terminal. When openconnect exits, the terminal shows its exit code and starts it again after 10 seconds, or at once when you press Enter. When the VPN session ends, log in again in the terminal.
-- Closing the terminal ends openconnect and with it the VPN connection. The terminal reopens about 1 second later and starts a new login.
+- Closing the terminal ends openconnect and with it the VPN connection, without logging the session off, so the gateway may keep the session until it times out. The terminal reopens about 1 second later and starts a new login.
 - The openconnect variant supports username and password logins, and SAML single sign-on only on gateways that allow the external browser mode. See [Which gateways does the openconnect variant support?](#which-gateways-does-the-openconnect-variant-support)
 
 ## Proxies
@@ -291,7 +294,7 @@ docker exec cisco-vpn diag.sh
 - `/etc/resolv.conf` and its mounts, and `/dev/net/tun`;
 - the other related processes (Xtigervnc, websockify, danted, tinyproxy and flwm) with their memory use, and `free -m`.
 
-The output contains the VPN's addresses, routes and DNS servers. Check it before you share it.
+The output contains the VPN's addresses, routes and DNS servers. In the openconnect variant, it also shows the full command lines of openconnect and its terminal, with any secrets passed in `CLI_OPTS`, such as `--cookie`, `--token-secret` or `--key-password`. Check it before you share it.
 
 ## Tests
 
@@ -402,8 +405,8 @@ After a single sign-on in the external browser mode, the browser is sent to `htt
 A published port reaches the container's own network address, not its loopback address. As docker-easyconnect's `force_open_ports` in its `start.sh` does for the ports where its clients wait for the browser, a nat `PREROUTING` rule redirects TCP connections to port 29786 of the container's own addresses to port 20000, where socat accepts them and connects to `[::1]:29786`.
 
 - The rule matches only the container's own addresses, so route mode is not affected.
-- Only this port is forwarded, so VNC on port 5901 and the other services on the loopback address stay unreachable from outside.
-- The firewall's `INPUT` rules still drop new TCP connections from the tunnel after the redirect.
+- Only this port is forwarded, so VNC on port 5901 and the other services on the loopback address stay unreachable from outside. socat listens on port 20000 of all the container's IPv4 addresses, so the container's network reaches that port as well, and it leads only to the callback.
+- The firewall's `INPUT` rules still drop new TCP connections from the tunnel, also after the redirect and to port 20000.
 - The rule and socat are set up only when openconnect is started, that is when `VPN_SERVER` is set and `CLI_OPTS` is accepted.
 
 ### Why is there no prebuilt image?
