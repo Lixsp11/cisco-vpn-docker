@@ -25,20 +25,26 @@ in_c() {
     docker exec cisco-vpn "$@"
 }
 
-# Wait up to 90 seconds for the entrypoint's ready line from the container's current start.
-# docker logs keeps the output of earlier starts, so only lines since State.StartedAt count.
-wait_ready() {
-    local started_at logs deadline=$((SECONDS + 90))
+# Wait up to 90 seconds for a log line from the container's current start that matches
+# the extended regular expression $1. docker logs keeps the output of earlier starts,
+# so only lines since State.StartedAt count.
+wait_log() {
+    local pattern=$1 started_at logs deadline=$((SECONDS + 90))
     started_at=$(docker inspect -f '{{.State.StartedAt}}' cisco-vpn) || return 1
     while [ "$SECONDS" -lt "$deadline" ]; do
         logs=$(docker logs --since "$started_at" cisco-vpn 2>&1)
-        if grep -qF '[start] all services started' <<<"$logs"; then
+        if grep -qE "$pattern" <<<"$logs"; then
             return 0
         fi
         sleep 1
     done
-    echo "no '[start] all services started' in the logs since $started_at after 90 seconds"
+    echo "no line matching '$pattern' in the logs since $started_at after 90 seconds"
     return 1
+}
+
+# Wait for the entrypoint's ready line from the container's current start
+wait_ready() {
+    wait_log '^\[start\] all services started$'
 }
 
 # Print the result and exit: 0 when every check passed, 1 otherwise
