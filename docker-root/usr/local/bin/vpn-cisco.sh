@@ -3,14 +3,16 @@
 #   VPN_TUN      the tunnel interface of the client
 #   vpn_prepare  preparation before any service starts
 #   vpn_start    starts the client processes with start.sh's run_service
-# Uses log, run_service, VPN_USER and DISPLAY from start.sh, and VPN_SERVER from the environment; vpn_prepare runs
-# after start.sh has given the home directory to VPN_USER.
+# diag.sh sources it as well and uses only vpn_diag, which prints the client's part of the diagnostics.
+# Uses log, run_service, VPN_USER and DISPLAY from start.sh, section and show_processes from diag.sh, and VPN_SERVER
+# from the environment; vpn_prepare runs after start.sh has given the home directory to VPN_USER.
 
 # Tunnel interface that the Cisco client creates when it connects; start.sh uses it
 # shellcheck disable=SC2034
 VPN_TUN=cscotun0
 
-CSC_BIN=/opt/cisco/secureclient/bin
+CSC_DIR=/opt/cisco/secureclient
+CSC_BIN=$CSC_DIR/bin
 
 # Give the GUI user default preferences when it has no preference file yet; an existing file holds
 # the user's own choices and is left alone. vpnui reads its preferences from ~/.vpn/.anyconnect
@@ -174,4 +176,18 @@ vpn_start() {
     # The VNC display has no GPU; disable WebKit hardware compositing
     export WEBKIT_DISABLE_COMPOSITING_MODE=1
     run_service vpnui run_vpnui
+}
+
+vpn_diag() {
+    section "Cisco version"
+    dpkg-query -W -f='${Package} ${Version}\n' cisco-secure-client-vpn
+
+    section "vpn state"
+    timeout 15 "$CSC_BIN/vpn" state
+
+    section "Cisco processes (RSS in KB)"
+    show_processes vpn
+
+    section "Files under $CSC_DIR newer than /etc/hostname (modified after the container was created or started)"
+    find "$CSC_DIR" -newer /etc/hostname -type f -printf '%TY-%Tm-%Td %TH:%TM  %10s  %p\n' | sort
 }

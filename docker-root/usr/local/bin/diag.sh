@@ -1,19 +1,30 @@
 #!/bin/bash
-# Print the state of the Cisco client, tunnel, routing, firewall, DNS and resources in one go.
-# A failing command does not stop the script.
+# Print the state of the VPN client, tunnel, routing, firewall, DNS and resources in one go.
+# The client's part comes from vpn_diag in the client steps vpn-<client>.sh of the client that the build wrote to
+# /etc/vpn-type, as in start.sh. A failing command does not stop the script.
 
 exec 2>&1
-CSC_DIR=/opt/cisco/secureclient
 
 section() {
     printf '\n===== %s =====\n' "$1"
 }
 
-section "Cisco version"
-dpkg-query -W -f='${Package} ${Version}\n' cisco-secure-client-vpn
+# Print the processes whose command line matches the extended regular expression $1, with ps's header line
+show_processes() {
+    ps -eo pid,rss,args | head -n 1
+    # Filter ps output rather than use pgrep, which cannot print the RSS column
+    # shellcheck disable=SC2009
+    ps -eo pid,rss,args | grep -E "$1" | grep -vE 'grep|sed -u'
+}
 
-section "vpn state"
-timeout 15 "$CSC_DIR/bin/vpn" state
+VPN_TYPE=$(cat /etc/vpn-type)
+# shellcheck source=/dev/null
+if source "/usr/local/bin/vpn-$VPN_TYPE.sh"; then
+    vpn_diag
+else
+    section "VPN client"
+    echo "cannot load the steps of the VPN client '$VPN_TYPE' that /etc/vpn-type names"
+fi
 
 section "Interfaces (ip -br addr)"
 ip -br addr
@@ -56,14 +67,8 @@ mount | grep resolv
 section "/dev/net/tun"
 ls -l /dev/net/tun
 
-section "Related processes (RSS in KB)"
-ps -eo pid,rss,args | head -n 1
-# Filter ps output rather than use pgrep, which cannot print the RSS column
-# shellcheck disable=SC2009
-ps -eo pid,rss,args | grep -E 'vpn|Xtiger|websockify|danted|tinyproxy|flwm' | grep -vE 'grep|sed -u'
+section "Other related processes (RSS in KB)"
+show_processes 'Xtiger|websockify|danted|tinyproxy|flwm'
 
 section "Memory (free -m)"
 free -m
-
-section "Files under $CSC_DIR newer than /etc/hostname (modified after the container was created or started)"
-find "$CSC_DIR" -newer /etc/hostname -type f -printf '%TY-%Tm-%Td %TH:%TM  %10s  %p\n' | sort

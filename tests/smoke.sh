@@ -819,8 +819,9 @@ login_terminal_waits() {
 }
 
 # Succeed when, after the container has run for 15 seconds, the entrypoint has logged exactly one line about
-# VPN_SERVER since its current start, the error that it is not set, and the login terminal has logged nothing.
-# 15 seconds is longer than the pause between two starts of openconnect.
+# VPN_SERVER since its current start, the error that it is not set, and the login terminal has logged nothing:
+# run_service would log each restart of a terminal that exits, and openconnect-login.sh would pause 10 seconds
+# between two starts of openconnect.
 missing_vpn_server_logged_once() {
     local started lines
     started=$(docker inspect -f '{{.State.StartedAt}}' cisco-vpn) || return 1
