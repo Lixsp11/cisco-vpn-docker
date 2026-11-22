@@ -72,21 +72,27 @@ ip_forward_is_set() {
     return 1
 }
 
-# The firewall's rules as iptables -S prints them, as extended regular expressions that match a whole rule.
-# The firewall marks its rules with a comment, and iptables may print the conntrack states in either order.
+# The firewall marks its rules with a comment, and iptables may print the conntrack states in either order
 fw_mark='-m comment --comment cisco-vpn-docker'
 fw_states='(RELATED,ESTABLISHED|ESTABLISHED,RELATED)'
-fw_input_rules=(
-    "-A INPUT -m conntrack --ctstate $fw_states $fw_mark -j ACCEPT"
-    "-A INPUT -i cscotun0 -p tcp $fw_mark -j DROP"
-)
-fw_forward_rules=(
-    "-A FORWARD -i eth0 -o cscotun0 $fw_mark -j ACCEPT"
-    "-A FORWARD -i cscotun0 -o eth0 -m conntrack --ctstate $fw_states $fw_mark -j ACCEPT"
-)
-fw_postrouting_rules=(
-    "-A POSTROUTING -o cscotun0 $fw_mark -j MASQUERADE"
-)
+
+# Set vpn_tun to the VPN client's tunnel interface $1, and fw_input_rules, fw_forward_rules and fw_postrouting_rules
+# to the firewall's rules for it, as iptables -S prints them, as extended regular expressions that match a whole
+# rule. The scripts call it before any firewall check.
+set_vpn_tun() {
+    vpn_tun=$1
+    fw_input_rules=(
+        "-A INPUT -m conntrack --ctstate $fw_states $fw_mark -j ACCEPT"
+        "-A INPUT -i $vpn_tun -p tcp $fw_mark -j DROP"
+    )
+    fw_forward_rules=(
+        "-A FORWARD -i eth0 -o $vpn_tun $fw_mark -j ACCEPT"
+        "-A FORWARD -i $vpn_tun -o eth0 -m conntrack --ctstate $fw_states $fw_mark -j ACCEPT"
+    )
+    fw_postrouting_rules=(
+        "-A POSTROUTING -o $vpn_tun $fw_mark -j MASQUERADE"
+    )
+}
 
 # Succeed when the first rules of chain $2 in table $1 in the container match the expressions $3..., in this order
 chain_starts_with() {
@@ -125,6 +131,7 @@ firewall_rules_are_unique() {
 # The single-quoted commands are expanded by the sh -c that runs them
 # shellcheck disable=SC2016
 run_firewall_checks() {
+    : "${vpn_tun:?set_vpn_tun must be called before the firewall checks}"
     check "container forwards IPv4 packets" in_c sh -c '[ "$(sysctl -n net.ipv4.ip_forward)" = 1 ]'
     check "container is created with net.ipv4.ip_forward=1" ip_forward_is_set
     check "INPUT starts with the firewall's two rules" chain_starts_with filter INPUT "${fw_input_rules[@]}"

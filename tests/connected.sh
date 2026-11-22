@@ -31,6 +31,8 @@
 # lib.sh is linted on its own
 # shellcheck source=/dev/null
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# The Cisco client's tunnel interface, which the firewall's rules name
+set_vpn_tun cscotun0
 
 ECHO_URL=${ECHO_URL:-https://ifconfig.me/ip}
 SOCKS5_PROXY=${SOCKS5_PROXY:-socks5h://127.0.0.1:1080}

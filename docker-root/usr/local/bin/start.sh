@@ -6,15 +6,20 @@
 # Its home directory is the volume that keeps the client's settings.
 VPN_USER=vpnuser
 
-# VPN client steps: defines VPN_TUN, vpn_prepare and vpn_start
-# shellcheck source=/dev/null
-source /usr/local/bin/vpn-cisco.sh
-# firewall.sh reads the tunnel interface from the environment
-export VPN_TUN
-
 log() {
     echo "[start] $*"
 }
+
+# VPN client steps of the image's client, which the build writes to /etc/vpn-type (cisco or openconnect):
+# vpn-<client>.sh defines VPN_TUN, vpn_prepare and vpn_start
+VPN_TYPE=$(cat /etc/vpn-type)
+# shellcheck source=/dev/null
+if ! source "/usr/local/bin/vpn-$VPN_TYPE.sh"; then
+    log "error: cannot load the steps of the VPN client '$VPN_TYPE' that /etc/vpn-type names"
+    exit 1
+fi
+# firewall.sh reads the tunnel interface from the environment
+export VPN_TUN
 
 # Run a service in a loop: when it exits, print the exit code and restart it after 1 second.
 # The prefixing sed ignores TERM/INT and ends only after the service closes its output,
@@ -47,7 +52,7 @@ trap stop_all TERM INT
 # to the GUI user, which saves its settings there. Not recursive: files that root keeps there stay root's.
 prepare_home() {
     chown "$VPN_USER:" "/home/$VPN_USER" ||
-        log "warning: cannot give the data directory /home/$VPN_USER to $VPN_USER; the Cisco client's settings" \
+        log "warning: cannot give the data directory /home/$VPN_USER to $VPN_USER; the VPN client's settings" \
             "and the VNC password may not be saved"
 }
 

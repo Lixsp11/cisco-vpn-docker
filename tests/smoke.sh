@@ -33,6 +33,10 @@
 # recreates it on the configured data directory.
 # The test data directory and the copies of the files compared across a recreate are removed before the
 # container is recreated on it and left in place afterwards.
+# The checks follow the VPN client of the container's image, cisco or openconnect, as its build wrote it to
+# /etc/vpn-type: the tunnel interface is the client's, and the image must hold only that client's software. The
+# checks of the Cisco client's processes, login record, preferences and client profile, of the unmounted
+# resolv.conf and hosts, and of the VPN_SERVER cases run only on the Cisco image.
 # Exits 0 when every check passes, 1 otherwise.
 
 # lib.sh is linted on its own
@@ -449,15 +453,24 @@ vpnagentd_logged_nothing() {
     ! docker logs --since "$since" cisco-vpn 2>&1 | grep '^\[vpnagentd\]'
 }
 
-# Succeed when cscotun0 is missing at least once in about 3 seconds. While giving the temporary interface its
-# address fails, run_service retries every second, and each try creates the interface and removes it at once,
-# so only an interface that stays exists every time.
+# Succeed when the tunnel interface does not exist in the container
+tunnel_interface_is_gone() {
+    # The single-quoted script is expanded by the sh that runs it, and set_vpn_tun in lib.sh sets vpn_tun
+    # shellcheck disable=SC2016,SC2154
+    in_c sh -c '! ip link show "$1"' sh "$vpn_tun"
+}
+
+# Succeed when the tunnel interface is missing at least once in about 3 seconds. While giving the temporary
+# interface its address fails, run_service retries every second, and each try creates the interface and removes it
+# at once, so only an interface that stays exists every time.
 tunnel_interface_is_not_kept() {
     for _ in $(seq 10); do
-        in_c sh -c '! ip link show cscotun0 >/dev/null 2>&1' && return 0
+        # The single-quoted script is expanded by the sh that runs it
+        # shellcheck disable=SC2016
+        in_c sh -c '! ip link show "$1" >/dev/null 2>&1' sh "$vpn_tun" && return 0
         sleep 0.3
     done
-    echo "cscotun0 exists on every try"
+    echo "$vpn_tun exists on every try"
     return 1
 }
 
@@ -650,8 +663,8 @@ displace_firewall_rules() {
 *filter
 -I INPUT 1 -j RETURN
 -I FORWARD 1 -j RETURN
--D INPUT -i cscotun0 -p tcp $fw_mark -j DROP
--A INPUT -i cscotun0 -p tcp -j DROP
+-D INPUT -i $vpn_tun -p tcp $fw_mark -j DROP
+-A INPUT -i $vpn_tun -p tcp -j DROP
 COMMIT
 EOF
 }
@@ -662,26 +675,65 @@ run_socks5_checks() {
     check "danted listens on port 1080" wait_danted
     check "SOCKS5 port is danted's" socks5_port_is_danteds
     check "SOCKS5 proxy works" socks5_works socks5h://127.0.0.1:1080
-    check "no temporary tunnel interface is left" in_c sh -c '! ip link show cscotun0'
+    check "no temporary tunnel interface is left" tunnel_interface_is_gone
+}
+
+# Succeed when the container finds none of the commands $@; print the ones that it finds
+commands_are_missing() {
+    local cmd status=0
+    for cmd; do
+        # The single-quoted script is expanded by the sh that runs it
+        # shellcheck disable=SC2016
+        in_c sh -c 'command -v "$1"' sh "$cmd" && status=1
+    done
+    return "$status"
+}
+
+# Checks that the image holds only the software of its own client: the Cisco image has none of the openconnect
+# image's packages, and the openconnect image has no Cisco files and no browser
+run_image_checks() {
+    local cmd
+    case $vpn_type in
+        cisco)
+            check "openconnect, xterm and socat are not installed" commands_are_missing openconnect xterm socat
+            ;;
+        openconnect)
+            check "no Cisco files are installed" in_c sh -c '! ls -d /opt/cisco'
+            for cmd in openconnect xterm socat; do
+                # The single-quoted script is expanded by the sh that runs it
+                # shellcheck disable=SC2016
+                check "$cmd is installed" in_c sh -c 'command -v "$1"' sh "$cmd"
+            done
+            check "no browser is installed" commands_are_missing chromium chromium-browser firefox firefox-esr
+            ;;
+    esac
 }
 
 # The single-quoted commands are expanded by the sh -c that runs them
 # shellcheck disable=SC2016
 run_checks() {
+    # A recreate that started an image of another client would change which checks apply
+    check "image is the $vpn_type image" in_c sh -c '[ "$(cat /etc/vpn-type)" = "$1" ]' sh "$vpn_type"
     check "noVNC page is reachable" curl -fsS -o /dev/null http://127.0.0.1:6080/vnc.html
-    check "resolv.conf is unmounted" in_c sh -c '! mountpoint -q /etc/resolv.conf'
-    check "hosts is unmounted" in_c sh -c '! mountpoint -q /etc/hosts'
+    if [ "$vpn_type" = cisco ]; then
+        check "resolv.conf is unmounted" in_c sh -c '! mountpoint -q /etc/resolv.conf'
+        check "hosts is unmounted" in_c sh -c '! mountpoint -q /etc/hosts'
+    fi
     check "DNS works in the container" in_c getent hosts deb.debian.org
-    check "vpnagentd runs as root" in_c sh -c '[ "$(ps -o user= -C vpnagentd | head -1)" = root ]'
-    check "vpnui runs as vpnuser" in_c sh -c '[ "$(ps -o user= -C vpnui | head -1)" = vpnuser ]'
-    check "vpnuser's processes have neither PASSWORD nor SOCKS_PASSWD" gui_has_no_secrets
-    check "utmp record points to an ancestor of vpnui" in_c sh -c "$utmp_check"
+    if [ "$vpn_type" = cisco ]; then
+        check "vpnagentd runs as root" in_c sh -c '[ "$(ps -o user= -C vpnagentd | head -1)" = root ]'
+        check "vpnui runs as vpnuser" in_c sh -c '[ "$(ps -o user= -C vpnui | head -1)" = vpnuser ]'
+        check "vpnuser's processes have neither PASSWORD nor SOCKS_PASSWD" gui_has_no_secrets
+        check "utmp record points to an ancestor of vpnui" in_c sh -c "$utmp_check"
+    fi
     # --noproxy '' keeps a NO_PROXY setting on the host from sending the request around the proxy
     check "HTTP proxy works" curl -fsS -o /dev/null --noproxy '' -x http://127.0.0.1:8888 https://deb.debian.org/
     check "only the loopback address ::1 listens on IPv6" only_loopback_listens_on_ipv6
     check "only NET_ADMIN and SYS_ADMIN are added" sh -c '[ "$(docker inspect -f "{{.HostConfig.CapAdd}}" cisco-vpn)" = "[CAP_NET_ADMIN CAP_SYS_ADMIN]" ]'
-    check "vpnui logged its preferences" wait_prefs_logged
-    check "preferences allow local LAN access by default" local_lan_access_is true
+    if [ "$vpn_type" = cisco ]; then
+        check "vpnui logged its preferences" wait_prefs_logged
+        check "preferences allow local LAN access by default" local_lan_access_is true
+    fi
     check "vpnuser can write its home" in_c setpriv --reuid=vpnuser --regid=vpnuser --init-groups \
         sh -c 'touch /home/vpnuser/.write-test && rm /home/vpnuser/.write-test'
     check "default VNC size is 1280x720" vnc_size_is 1280x720
@@ -690,21 +742,40 @@ run_checks() {
     run_firewall_checks
 }
 
+# The VPN client of the container's image and its tunnel interface
+if ! vpn_type=$(docker exec cisco-vpn cat /etc/vpn-type); then
+    echo "error: cannot read /etc/vpn-type in the container cisco-vpn; start it with docker compose up -d first"
+    exit 1
+fi
+case $vpn_type in
+    cisco) set_vpn_tun cscotun0 ;;
+    openconnect) set_vpn_tun tun0 ;;
+    *)
+        echo "error: /etc/vpn-type in the container cisco-vpn names the unknown VPN client '$vpn_type'"
+        exit 1
+        ;;
+esac
+echo "--- image of the $vpn_type client, tunnel interface $vpn_tun ---"
+
 check "services started" wait_ready
+run_image_checks
 run_checks
 run_socks5_checks
 
 # With no VPN connected, danted's restart creates the temporary tunnel interface again and removes it
 echo "--- after danted exits ---"
 restart_danted_checks
-check "no temporary tunnel interface is left after danted restarts" in_c sh -c '! ip link show cscotun0'
+check "no temporary tunnel interface is left after danted restarts" tunnel_interface_is_gone
 
 # A tunnel interface without the temporary interface's address is the VPN client's and is kept
 echo "--- after danted exits while a tunnel interface exists ---"
-check "tunnel interface with address 10.0.0.2/32 is created" in_c sh -c 'ip tuntap add mode tun cscotun0 && ip addr add 10.0.0.2/32 dev cscotun0'
+# The single-quoted scripts are expanded by the sh that runs them
+# shellcheck disable=SC2016
+check "tunnel interface with address 10.0.0.2/32 is created" in_c sh -c 'ip tuntap add mode tun "$1" && ip addr add 10.0.0.2/32 dev "$1"' sh "$vpn_tun"
 restart_danted_checks
-check "tunnel interface is kept" in_c sh -c 'ip -o addr show dev cscotun0 | grep -q " inet 10.0.0.2/32 "'
-check "tunnel interface is removed" in_c ip tuntap del mode tun cscotun0
+# shellcheck disable=SC2016
+check "tunnel interface is kept" in_c sh -c 'ip -o addr show dev "$1" | grep -q " inet 10.0.0.2/32 "' sh "$vpn_tun"
+check "tunnel interface is removed" in_c ip tuntap del mode tun "$vpn_tun"
 
 # The firewall checks its rules every 5 seconds, so within 12 seconds it repairs each chain once and then finds
 # its rules first at least once more. The rules change in one transaction, so a check of the firewall finds
@@ -716,11 +787,13 @@ check "rules are inserted at the top of INPUT and FORWARD and the DROP rule is r
     displace_firewall_rules
 sleep 12
 run_firewall_checks
-check "other rules keep their order" unmarked_rules_are $'-A INPUT -j RETURN\n-A INPUT -i cscotun0 -p tcp -j DROP' \
+check "other rules keep their order" unmarked_rules_are "-A INPUT -j RETURN"$'\n'"-A INPUT -i $vpn_tun -p tcp -j DROP" \
     "-A FORWARD -j RETURN"
 check "firewall logged one repair of INPUT and one of FORWARD" firewall_repaired_input_and_forward_once "$inserted_at"
+# The single-quoted script is expanded by the sh that runs it
+# shellcheck disable=SC2016
 check "inserted rules are removed" in_c sh -c \
-    'iptables -D INPUT -j RETURN && iptables -D INPUT -i cscotun0 -p tcp -j DROP && iptables -D FORWARD -j RETURN'
+    'iptables -D INPUT -j RETURN && iptables -D INPUT -i "$1" -p tcp -j DROP && iptables -D FORWARD -j RETURN' sh "$vpn_tun"
 check "only the firewall's rules are left in INPUT and FORWARD" unmarked_rules_are "" ""
 
 echo "--- after docker restart ---"
@@ -734,14 +807,14 @@ echo "--- while giving the temporary tunnel interface its address fails ---"
 check "ip wrapper that fails ip addr add is installed" install_ip_wrapper
 check "container restarts" docker restart cisco-vpn
 check "services started after restart" wait_ready
-check "failed address assignment is logged" wait_log '^\[socks5\] warning: cannot give the temporary interface cscotun0 its address'
+check "failed address assignment is logged" wait_log "^\[socks5\] warning: cannot give the temporary interface $vpn_tun its address"
 check "danted is not started" danted_is_off
 check "temporary tunnel interface is not kept" tunnel_interface_is_not_kept
 assignable_at=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
 check "ip addr add works again" in_c rm "$fail_ip_addr_flag"
 check "danted listens once ip addr add works" wait_danted "$assignable_at"
 check "SOCKS5 proxy works" socks5_works socks5h://127.0.0.1:1080
-check "no temporary tunnel interface is left" in_c sh -c '! ip link show cscotun0'
+check "no temporary tunnel interface is left" tunnel_interface_is_gone
 
 # Docker creates a missing data directory as root
 echo "--- on an empty data directory ---"
@@ -751,9 +824,11 @@ check "container is recreated on the test data directory" recreate CISCO_VPN_DAT
 check "services started after recreate" wait_ready
 run_checks
 run_socks5_checks
-check "default preferences are in the test data directory" test -f "$test_data/$prefs"
-check "no client profile is written without VPN_SERVER" profile_is absent
-check "missing VPN_SERVER warning is logged" wait_log '^\[start\] warning: VPN_SERVER is not set'
+if [ "$vpn_type" = cisco ]; then
+    check "default preferences are in the test data directory" test -f "$test_data/$prefs"
+    check "no client profile is written without VPN_SERVER" profile_is absent
+    check "missing VPN_SERVER warning is logged" wait_log '^\[start\] warning: VPN_SERVER is not set'
+fi
 check "VNC password file holds the default password" vnc_passwd_holds password
 check "default VNC password warning is logged" wait_log '^\[start\] warning: PASSWORD is not set'
 check "VNC accepts the default password" vnc_accepts password
@@ -763,7 +838,9 @@ check "VNC accepts the default password" vnc_accepts password
 echo "--- while iptables fails and iptables-restore works ---"
 failing_from=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
 check "failing iptables is installed" install_failing_command iptables
-check "firewall.sh apply fails" sh -c '! docker exec -e VPN_TUN=cscotun0 cisco-vpn firewall.sh apply'
+# The single-quoted script is expanded by the sh that runs it
+# shellcheck disable=SC2016
+check "firewall.sh apply fails" sh -c '! docker exec -e VPN_TUN="$1" cisco-vpn firewall.sh apply' sh "$vpn_tun"
 sleep 6
 check "failing iptables is removed" in_c rm /usr/local/sbin/iptables
 run_firewall_checks
@@ -777,7 +854,9 @@ check "failing iptables-restore is installed" install_failing_command iptables-r
 check "container restarts" docker restart cisco-vpn
 check "container exits with an error" container_exits_with_error
 check "firewall failure is logged" wait_log '^\[start\] error: cannot put the firewall rules in place'
-check "vpnagentd is not started" vpnagentd_logged_nothing
+if [ "$vpn_type" = cisco ]; then
+    check "vpnagentd is not started" vpnagentd_logged_nothing
+fi
 
 echo "--- with SOCKS_USER and SOCKS_PASSWD set ---"
 check "container is recreated with SOCKS_USER and SOCKS_PASSWD" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
@@ -890,56 +969,59 @@ check "services started after recreate" wait_ready
 check "refused PING_INTERVAL is logged" wait_log '^\[start\] error: PING_INTERVAL is not a whole number of seconds above 0'
 check "keepalive does not run" keepalive_is_off
 
-# The profile turns on local LAN access for the gateway VPN_SERVER, and both client processes load it.
-# docker restart keeps the container's files, so the restart replaces the profile of the first start.
-echo "--- with VPN_SERVER set ---"
-check "container is recreated with VPN_SERVER=$test_server" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
-    SOCKS_USER= SOCKS_PASSWD= NODANTED= PING_ADDR= PING_ADDR_URL= PING_INTERVAL= VPN_SERVER="$test_server"
-check "services started after recreate" wait_ready
-check "client profile lists VPN_SERVER and turns on local LAN access" profile_lists "$test_server"
-check "no temporary profile file is left" profile_is present
-check "vpnagentd loaded the client profile" wait_log 'csc_vpnagent\[[0-9]+\]: .*Loaded profiles: .*/cisco-vpn-docker\.xml'
-check "vpnui loaded the client profile" wait_log 'csc_ui\[[0-9]+\]: .*Loaded profiles: .*/cisco-vpn-docker\.xml'
-check "nothing is logged about VPN_SERVER" nothing_logged_about_vpn_server
-check "container restarts" docker restart cisco-vpn
-check "services started after restart" wait_ready
-check "client profile lists VPN_SERVER after restart" profile_lists "$test_server"
-check "no temporary profile file is left after restart" profile_is present
-for server in 192.0.2.1 2001:db8::1 "$label63.example.com"; do
-    check "VPN_SERVER=${server:0:24} is accepted" accepts_server "$server"
-done
-for server in : ... vpn..example.com -vpn.example.com vpn-.example.com "$label64.example.com" 192.0.2.256 \
-    01.2.3.4 1:::2 'vpn.example.com"/><x' "$too_long_server"; do
-    check "VPN_SERVER=${server:0:24} is refused and the profile of an earlier run is removed" \
-        removes_profile_for "$server" '^\[start\] error: VPN_SERVER is not a host name or an IP address'
-done
-check "empty VPN_SERVER removes the profile of an earlier run" \
-    removes_profile_for "" '^\[start\] warning: VPN_SERVER is not set'
-check "a profile that cannot be removed is logged" \
-    logs_profile_failure "" '^\[start\] error: cannot remove the client profile'
-check "a profile that cannot be replaced is logged" \
-    logs_profile_failure "$test_server" '^\[start\] error: cannot write the client profile'
+# The VPN_SERVER cases and the preference file case check the Cisco client's profile and preferences
+if [ "$vpn_type" = cisco ]; then
+    # The profile turns on local LAN access for the gateway VPN_SERVER, and both client processes load it.
+    # docker restart keeps the container's files, so the restart replaces the profile of the first start.
+    echo "--- with VPN_SERVER set ---"
+    check "container is recreated with VPN_SERVER=$test_server" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
+        SOCKS_USER= SOCKS_PASSWD= NODANTED= PING_ADDR= PING_ADDR_URL= PING_INTERVAL= VPN_SERVER="$test_server"
+    check "services started after recreate" wait_ready
+    check "client profile lists VPN_SERVER and turns on local LAN access" profile_lists "$test_server"
+    check "no temporary profile file is left" profile_is present
+    check "vpnagentd loaded the client profile" wait_log 'csc_vpnagent\[[0-9]+\]: .*Loaded profiles: .*/cisco-vpn-docker\.xml'
+    check "vpnui loaded the client profile" wait_log 'csc_ui\[[0-9]+\]: .*Loaded profiles: .*/cisco-vpn-docker\.xml'
+    check "nothing is logged about VPN_SERVER" nothing_logged_about_vpn_server
+    check "container restarts" docker restart cisco-vpn
+    check "services started after restart" wait_ready
+    check "client profile lists VPN_SERVER after restart" profile_lists "$test_server"
+    check "no temporary profile file is left after restart" profile_is present
+    for server in 192.0.2.1 2001:db8::1 "$label63.example.com"; do
+        check "VPN_SERVER=${server:0:24} is accepted" accepts_server "$server"
+    done
+    for server in : ... vpn..example.com -vpn.example.com vpn-.example.com "$label64.example.com" 192.0.2.256 \
+        01.2.3.4 1:::2 'vpn.example.com"/><x' "$too_long_server"; do
+        check "VPN_SERVER=${server:0:24} is refused and the profile of an earlier run is removed" \
+            removes_profile_for "$server" '^\[start\] error: VPN_SERVER is not a host name or an IP address'
+    done
+    check "empty VPN_SERVER removes the profile of an earlier run" \
+        removes_profile_for "" '^\[start\] warning: VPN_SERVER is not set'
+    check "a profile that cannot be removed is logged" \
+        logs_profile_failure "" '^\[start\] error: cannot remove the client profile'
+    check "a profile that cannot be replaced is logged" \
+        logs_profile_failure "$test_server" '^\[start\] error: cannot write the client profile'
 
-# The value goes into the profile's XML, so anything but a host name or an IP address is refused
-echo "--- with a VPN_SERVER that is not a host name ---"
-check "container is recreated with an invalid VPN_SERVER" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
-    SOCKS_USER= SOCKS_PASSWD= NODANTED= PING_ADDR= PING_ADDR_URL= PING_INTERVAL= VPN_SERVER='vpn.example.com"/><x'
-check "services started after recreate" wait_ready
-check "refused VPN_SERVER is logged" wait_log '^\[start\] error: VPN_SERVER is not a host name or an IP address'
-check "no client profile is written for an invalid VPN_SERVER" profile_is absent
+    # The value goes into the profile's XML, so anything but a host name or an IP address is refused
+    echo "--- with a VPN_SERVER that is not a host name ---"
+    check "container is recreated with an invalid VPN_SERVER" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
+        SOCKS_USER= SOCKS_PASSWD= NODANTED= PING_ADDR= PING_ADDR_URL= PING_INTERVAL= VPN_SERVER='vpn.example.com"/><x'
+    check "services started after recreate" wait_ready
+    check "refused VPN_SERVER is logged" wait_log '^\[start\] error: VPN_SERVER is not a host name or an IP address'
+    check "no client profile is written for an invalid VPN_SERVER" profile_is absent
 
-# A preference file that already exists holds the user's choices and must be kept as a whole: the file that
-# replaces the default one turns LocalLanAccess off and names a gateway, and it is compared byte for byte after
-# a recreate with VPN_SERVER set
-echo "--- with a preference file of the user's ---"
-check "default preference file is replaced by one with LocalLanAccess false and a gateway" write_user_prefs
-check "preference file is copied for comparison" cp "$test_data/$prefs" "$edited_prefs"
-check "container is recreated with VPN_SERVER" recreate CISCO_VPN_DATA="$test_data" VPN_SERVER="$test_server"
-check "services started after recreate" wait_ready
-# cmp fails when either file is missing
-check "preference file is unchanged" cmp "$edited_prefs" "$test_data/$prefs"
-check "vpnui logged its preferences" wait_prefs_logged
-check "vpnui reads the user's LocalLanAccess: false" local_lan_access_is false
+    # A preference file that already exists holds the user's choices and must be kept as a whole: the file that
+    # replaces the default one turns LocalLanAccess off and names a gateway, and it is compared byte for byte after
+    # a recreate with VPN_SERVER set
+    echo "--- with a preference file of the user's ---"
+    check "default preference file is replaced by one with LocalLanAccess false and a gateway" write_user_prefs
+    check "preference file is copied for comparison" cp "$test_data/$prefs" "$edited_prefs"
+    check "container is recreated with VPN_SERVER" recreate CISCO_VPN_DATA="$test_data" VPN_SERVER="$test_server"
+    check "services started after recreate" wait_ready
+    # cmp fails when either file is missing
+    check "preference file is unchanged" cmp "$edited_prefs" "$test_data/$prefs"
+    check "vpnui logged its preferences" wait_prefs_logged
+    check "vpnui reads the user's LocalLanAccess: false" local_lan_access_is false
+fi
 
 # A passwd.new left next to the password file must not decide the new file's mode
 echo "--- with PASSWORD and VNC_SIZE set ---"
