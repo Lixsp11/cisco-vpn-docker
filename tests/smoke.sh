@@ -4,8 +4,8 @@
 # and runs every check once more. Then checks the persistent home directory: it recreates the container
 # on an empty data directory of its own under the repository's tmp/, changes a preference there and
 # recreates the container again, recreates it with PASSWORD and VNC_SIZE set, once more with both empty and
-# once with a PASSWORD of two lines, restarts it with a link named passwd.new next to the VNC password file,
-# and finally recreates it on the configured data directory.
+# once with a PASSWORD of two lines, once with another PASSWORD that cannot be written because the VNC
+# password's directory is read-only, and finally recreates it on the configured data directory.
 # The test data directory and the copies of the files compared across a recreate are removed at the start
 # of these checks and left in place afterwards.
 # Exits 0 when every check passes, 1 otherwise.
@@ -21,7 +21,7 @@ prefs=.vpn/.anyconnect
 # Copy of the preference file as edited by the checks, compared with the file after a recreate
 edited_prefs=$repo/tmp/smoke-prefs-edited
 vnc_passwd=.vnc/passwd
-# Copy of the VNC password file written for PASSWORD, compared with the file after a recreate without PASSWORD
+# Copy of the saved VNC password file, compared with the file after a recreate that must not change it
 saved_vnc_passwd=$repo/tmp/smoke-vnc-passwd
 # VNC uses only the first 8 characters of a password. This one has a space and special characters and goes on
 # past the 255 characters that tigervncpasswd -f reads as one password; the "xyz" after them must not become
@@ -251,14 +251,17 @@ check "VNC password file holds the first line of PASSWORD" vnc_passwd_holds pw1
 check "VNC accepts the first line of PASSWORD" vnc_accepts pw1
 check "VNC rejects the second line of PASSWORD" vnc_rejects pw2
 
-# A link named passwd.new must not lead the write to the password file itself
-echo "--- with a link named passwd.new ---"
+# A failed write keeps the saved password, also when a link named passwd.new leads to the password file
+# itself. The write fails because vpnuser cannot create files in a read-only .vnc.
+echo "--- with a failed write and a link named passwd.new ---"
+check "VNC password file is copied for comparison" cp "$test_data/$vnc_passwd" "$saved_vnc_passwd"
 check "passwd.new is created as a link to the VNC password file" plant_passwd_new link
-check "container restarts" docker restart cisco-vpn
-check "services started after restart" wait_ready
-check "VNC password file is a regular file of vpnuser's with mode 600" vnc_passwd_is_private
-check "VNC password file holds the first line of PASSWORD" vnc_passwd_holds pw1
-check "VNC accepts the first line of PASSWORD" vnc_accepts pw1
+check ".vnc is made read-only" in_c setpriv --reuid=vpnuser --regid=vpnuser --init-groups chmod 500 /home/vpnuser/.vnc
+check "container is recreated with another PASSWORD" recreate CISCO_VPN_DATA="$test_data" PASSWORD=another1 VNC_SIZE=
+check "services started after recreate" wait_ready
+check "failed write is logged" wait_log '^\[start\] warning: cannot write the VNC password file'
+check "VNC password file is unchanged" cmp "$saved_vnc_passwd" "$test_data/$vnc_passwd"
+check "VNC accepts the saved password" vnc_accepts pw1
 
 echo "--- back on the configured data directory ---"
 check "container is recreated" recreate
