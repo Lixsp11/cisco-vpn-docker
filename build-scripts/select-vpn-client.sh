@@ -1,15 +1,14 @@
 #!/bin/bash
 # Chooses the image's VPN client at build time, before anything is installed, and writes its name to
-# /etc/vpn-type, which the next build step and start.sh read:
-#   cisco        the Cisco Secure Client package in /tmp/packages (packages/ of the build context): the file that
-#                the build argument CSC_DEB names, or else the only .deb file there.
+# /etc/vpn-type, which the rest of the Dockerfile's install step and start.sh read:
+#   cisco        the Cisco Secure Client package in /tmp/packages, where that step mounts packages/ of the build
+#                context: the file that the build argument CSC_DEB names, or else the only .deb file there.
 #                /tmp/cisco-secure-client-vpn.deb then links to it.
 #   openconnect  when CSC_DEB is empty and /tmp/packages holds no .deb file
 # Every .deb file in packages/, hidden ones and those in subdirectories included, must be a Cisco package named
 # cisco-secure-client-vpn_<version>_amd64.deb directly in packages/, and CSC_DEB must be the name of one of them,
 # without a directory. Fails, and says why, when one is not, or when CSC_DEB is empty and packages/ holds several:
-# it never picks one of several packages, never builds the openconnect image from a context that holds a package,
-# and never builds an image whose layers keep a .deb file that it does not install.
+# it never picks one of several packages, and never builds the openconnect image from a context that holds a package.
 set -euo pipefail
 
 packages=/tmp/packages

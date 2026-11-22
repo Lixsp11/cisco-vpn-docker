@@ -40,7 +40,7 @@ The container runs with the `NET_ADMIN` and `SYS_ADMIN` capabilities and `/dev/n
 
 ## Requirements
 
-- A Linux host (amd64) with Docker and Docker Compose (`docker compose`)
+- A Linux host (amd64) with Docker and Docker Compose (`docker compose`). The build needs BuildKit, Docker's default builder since Docker Engine 23.0.
 - `/dev/net/tun` on the host
 - For the Cisco variant, your own Cisco Secure Client VPN package for Linux: the full package with the GUI, `cisco-secure-client-vpn_<version>_amd64.deb`
 

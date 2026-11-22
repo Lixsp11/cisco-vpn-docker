@@ -6,21 +6,21 @@ ARG DEBIAN_FRONTEND=noninteractive
 # build-scripts/select-vpn-client.sh has the rules.
 ARG CSC_DEB=
 
-COPY packages/ /tmp/packages/
-COPY build-scripts/select-vpn-client.sh /tmp/build-scripts/
-
-# Choose the VPN client first, so that a packages/ directory it refuses fails the build at once.
-# It writes cisco or openconnect to /etc/vpn-type.
-RUN bash /tmp/build-scripts/select-vpn-client.sh
-
-# Install VNC, noVNC, diagnostic tools, proxies and busybox (ping and wget for the keepalive), and the packages of
-# the chosen client: for the Cisco client, WebKit for its login window, then the Cisco package (apt resolves its
+# packages/ and build-scripts/ of the build context are BuildKit bind mounts, read-only and only while this step
+# runs, so no file of them, not even the installed Cisco package, is in a layer of the image.
+# First choose the VPN client, so that a packages/ directory it refuses fails the build before apt runs.
+# select-vpn-client.sh writes cisco or openconnect to /etc/vpn-type.
+# Then install VNC, noVNC, diagnostic tools, proxies and busybox (ping and wget for the keepalive), and the packages
+# of the chosen client: for the Cisco client, WebKit for its login window, then the Cisco package (apt resolves its
 # Depends); for openconnect, openconnect, xterm and socat.
 # Versions are not pinned: the Debian archive keeps only the current version of each package,
 # so pins would break the build after the next point release or security update.
 # client_packages is a list of package names, split on purpose.
 # hadolint ignore=DL3008,SC2086
-RUN if [ "$(cat /etc/vpn-type)" = cisco ]; then \
+RUN --mount=type=bind,source=packages,target=/tmp/packages \
+    --mount=type=bind,source=build-scripts,target=/tmp/build-scripts \
+    bash /tmp/build-scripts/select-vpn-client.sh \
+ && if [ "$(cat /etc/vpn-type)" = cisco ]; then \
         client_packages="libwebkit2gtk-4.1-0 dbus-x11 xdg-utils"; \
     else \
         client_packages="openconnect xterm socat"; \
@@ -37,7 +37,7 @@ RUN if [ "$(cat /etc/vpn-type)" = cisco ]; then \
  && if [ "$(cat /etc/vpn-type)" = cisco ]; then \
         apt-get install -y --no-install-recommends /tmp/cisco-secure-client-vpn.deb; \
     fi \
- && rm -rf /tmp/packages /tmp/build-scripts /tmp/cisco-secure-client-vpn.deb /var/lib/apt/lists/*
+ && rm -rf /tmp/cisco-secure-client-vpn.deb /var/lib/apt/lists/*
 
 # Unprivileged user that runs the VPN client's GUI and owns the data directory (the Cisco client's vpnagentd
 # refuses to verify server certificates as root), and the system user of danted's unprivileged operations
