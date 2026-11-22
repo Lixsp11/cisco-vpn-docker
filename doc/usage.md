@@ -10,6 +10,7 @@
 - [Persistence](#persistence)
 - [Firewall](#firewall)
 - [Diagnostics](#diagnostics)
+- [Tests](#tests)
 - [FAQ](#faq)
 
 ## Build
@@ -45,6 +46,8 @@ The image is tagged with the package version and `latest`. The package on ghcr.i
 - The repository is private. A package that a workflow creates gets the visibility of the repository.
 - The image name has the form above.
 - ghcr.io refuses anonymous pulls of the image (HTTP 401, 403 or 404), so the package is private or does not exist yet. A package that does not exist yet is created by the push. When anyone can pull the image without credentials, or when a request to ghcr.io fails or gets any other answer, the workflow stops.
+
+Before you make the repository public, confirm in the package's settings on GitHub that the package is still private.
 
 ## Configuration
 
@@ -211,6 +214,7 @@ The rules are IPv4 iptables rules in the container's own network namespace. Each
 - When the Cisco client connects, it adds chains of its own and jumps to them from `INPUT` and `FORWARD` (observed in testing). Its chain for `INPUT` returns packets from the tunnel interface to `INPUT`, which would then accept them (observed in testing). The drop rule above stops new TCP connections among them.
 - The client may rebuild its chains when it connects. Every 5 seconds the container checks that its rules are the first rules of their chains, and puts them back when they are not. Each repair is logged, for example `[firewall] put the rules first in the INPUT chain of the filter table`. Only rules with the comment are ever deleted or moved.
 - When the rules cannot be put in place at start, the container stops before any service starts and logs `[start] error: cannot put the firewall rules in place (the container needs the NET_ADMIN capability); stopping before any service starts`. When a later check fails, the error is logged once and the check is tried again every 5 seconds.
+- There are no IPv6 rules. The container's services listen only on IPv4 and on the IPv6 loopback address `::1`, so the VPN side cannot reach them over IPv6.
 
 ## Diagnostics
 
@@ -234,6 +238,20 @@ docker exec cisco-vpn diag.sh
 - the files under `/opt/cisco/secureclient` that changed after the container was created or started.
 
 The output contains the VPN's addresses, routes and DNS servers. Check it before you share it.
+
+## Tests
+
+The scripts in `tests/` run as root on the Docker host, from any working directory, against the container `cisco-vpn` of the repository's compose file.
+
+`tests/smoke.sh` needs no VPN login. Run it after `docker compose up -d --build`:
+
+- It restarts and recreates the container many times, which ends any VPN session. At the end it recreates the container with the configured settings.
+- It needs internet access: the proxy checks request `https://deb.debian.org/`.
+- The first checks run on the configured container and data directory. `.env` must set none of `VNC_SIZE`, `NODANTED`, `SOCKS_USER` and `SOCKS_PASSWD`, and the saved preferences must keep "Allow local (LAN) access" turned on (`LocalLanAccess` true in `.vpn/.anyconnect`).
+- The cases that change the data directory use `tmp/smoke-data` in the repository, not the configured data directory.
+- An interrupted run can leave the container with test settings or test commands. To recreate it with the configured settings, run `docker compose up -d --force-recreate`.
+
+`tests/connected.sh` checks a real connection. Log in to the VPN in the Cisco window first. It needs root, and for the route mode check it adds one `/32` host route through the container and removes it again. The script's header lists its checks and environment variables.
 
 ## FAQ
 

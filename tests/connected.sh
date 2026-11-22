@@ -26,7 +26,7 @@
 #                 (default socks5h://127.0.0.1:1080)
 #   GATEWAY       VPN gateway address; when set, the report lists the files in the data directory that contain it
 # Exits 0 when every check passes, 1 otherwise, and 2 when it cannot run. Sourcing the script defines its
-# functions without running the checks, for tests of the route handling.
+# functions without running the checks.
 
 # lib.sh is linted on its own
 # shellcheck source=/dev/null

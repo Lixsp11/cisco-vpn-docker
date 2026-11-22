@@ -1,11 +1,20 @@
 #!/bin/bash
-# Smoke tests that need no VPN login. Run on the Docker host after `docker compose up -d --build`.
+# Smoke tests that need no VPN login. Run as root on the Docker host after `docker compose up -d --build`.
+# Preconditions and side effects (also in doc/usage.md, Tests):
+#   - It restarts and recreates the configured container cisco-vpn, which ends any VPN session, and finally
+#     recreates it with the configured settings. After an interrupted run, `docker compose up -d --force-recreate`
+#     brings back the configured container.
+#   - It needs internet access: the proxy checks request https://deb.debian.org/.
+#   - The first checks run on the configured container and data directory: .env must set none of VNC_SIZE,
+#     NODANTED, SOCKS_USER and SOCKS_PASSWD, and the saved preferences must keep LocalLanAccess true.
+#   - The cases that change the data directory use tmp/smoke-data in the repository.
+#
 # Waits until the container is ready and runs every check. Stops danted twice, the second time while a tunnel
 # interface of another address exists, and checks the SOCKS5 proxy after run_service restarts it. Puts a rule
 # before the firewall's rules in INPUT and in FORWARD, as the VPN client may do when it connects, and replaces the
-# firewall's DROP rule with an unmarked copy at the end of INPUT; checks that the firewall puts its rules back at
-# the top and leaves the other rules in their order, and removes those rules again. Restarts the
-# container, waits again and runs every check once more, then restarts it once more while giving the temporary
+# firewall's DROP rule with an unmarked copy at the end of INPUT, all in one transaction; checks that the firewall
+# puts its rules back at the top and leaves the other rules in their order, and removes those rules again. Restarts
+# the container, waits again and runs every check once more, then restarts it once more while giving the temporary
 # tunnel interface its address fails. Then recreates the container on an empty data directory of its own under
 # the repository's tmp/ and runs every check there. On that directory it makes iptables fail while
 # iptables-restore works and checks that the firewall changes nothing. It restarts the container while iptables
@@ -45,11 +54,9 @@ saved_vnc_passwd=$repo/tmp/smoke-vnc-passwd
 long_password="p@ss w0rd!$(printf '%0245d' 0)xyz"
 # The second line of a password must not become a view-only password either
 two_line_password=$'pw1\npw2'
-# Client profile that the container writes from VPN_SERVER, the profile directory's listing with it and without
-# it, and the gateway address of the checks (a reserved example domain)
+# Client profile that the container writes from VPN_SERVER, and the gateway address of the checks (a reserved
+# example domain)
 csc_profile=/opt/cisco/secureclient/vpn/profile/cisco-vpn-docker.xml
-profile_dir_with_profile=$'AnyConnectProfile.xsd\ncisco-vpn-docker.xml'
-profile_dir_without_profile=AnyConnectProfile.xsd
 test_server=vpn.example.com
 # Host name labels of the longest length allowed and one character longer, and a host name of more than 253
 # characters
@@ -200,13 +207,18 @@ profile_lists() {
     in_c python3 -c "$profile_check" "$csc_profile" "$1"
 }
 
-# Succeed when the profile directory in the container holds exactly the files $1, one per line, so also no
-# temporary file of the profile
-profile_dir_holds() {
-    local files
+# Succeed when the client profile in the container is $1, "present" or "absent", and the profile directory holds
+# no temporary file of the profile (cisco-vpn-docker.xml.*). The directory's other files come with the Cisco
+# package and are not checked.
+profile_is() {
+    local files name state=absent
+    name=$(basename "$csc_profile")
     files=$(in_c ls -A "$(dirname "$csc_profile")") || return 1
-    [ "$files" = "$1" ] && return 0
-    printf 'the profile directory holds:\n%s\n' "$files"
+    grep -qxF -- "$name" <<<"$files" && state=present
+    if [ "$state" = "$1" ] && ! grep -qF -- "$name." <<<"$files"; then
+        return 0
+    fi
+    printf 'the client profile is %s, expected %s; the profile directory holds:\n%s\n' "$state" "$1" "$files"
     return 1
 }
 
@@ -237,7 +249,7 @@ accepts_server() {
         printf 'vpn_prepare logged:\n%s\n' "$output"
         return 1
     fi
-    profile_lists "$1" && profile_dir_holds "$profile_dir_with_profile"
+    profile_lists "$1" && profile_is present
 }
 
 # Succeed when vpn_prepare, run again with VPN_SERVER=$1 after a run that wrote a profile, logs a line that
@@ -250,7 +262,7 @@ removes_profile_for() {
         printf 'vpn_prepare logged:\n%s\n' "$output"
         return 1
     fi
-    profile_dir_holds "$profile_dir_without_profile"
+    profile_is absent
 }
 
 # Succeed when vpn_prepare, run again with VPN_SERVER=$1 while a directory that is not empty has the profile's
@@ -603,6 +615,47 @@ run_keepalive_url_checks() {
         wait_log "^\[keepalive\] $keepalive_url unreachable\$" "$stopped_at" 10
 }
 
+# Succeed when every TCP socket in the container that listens on IPv6 listens on the loopback address ::1. The
+# firewall's rules are IPv4 rules, so a service on any other IPv6 address, or on all of them, could be reached from
+# the VPN side.
+only_loopback_listens_on_ipv6() {
+    local listeners others
+    listeners=$(in_c ss -Hltn -6) || return 1
+    others=$(awk '$4 !~ /^\[::1\]:/' <<<"$listeners")
+    [ -z "$others" ] && return 0
+    printf 'TCP sockets that listen on IPv6 addresses other than ::1:\n%s\n' "$others"
+    return 1
+}
+
+# Succeed when vpnui runs and no process of vpnuser's has PASSWORD or SOCKS_PASSWD in its environment. The
+# container's root lacks CAP_SYS_PTRACE and cannot read the environment of another user's processes, so the check
+# runs as vpnuser. It runs without these variables itself, which docker exec gives it from the container's settings.
+gui_has_no_secrets() {
+    # The single-quoted script is expanded by the sh that runs it
+    # shellcheck disable=SC2016
+    docker exec cisco-vpn env -u PASSWORD -u SOCKS_PASSWD setpriv --reuid=vpnuser --regid=vpnuser --init-groups sh -c '
+        pgrep -u vpnuser -x vpnui >/dev/null || { echo "vpnui is not running"; exit 1; }
+        found=
+        for pid in $(pgrep -u vpnuser); do
+            names=$(tr "\0" "\n" 2>/dev/null <"/proc/$pid/environ" | grep -oE "^(PASSWORD|SOCKS_PASSWD)=")
+            [ -z "$names" ] || { echo "process $pid has" $names; found=1; }
+        done
+        [ -z "$found" ]'
+}
+
+# In one iptables-restore transaction, insert a rule at the top of INPUT and of FORWARD and replace the firewall's
+# DROP rule with an unmarked copy at the end of INPUT
+displace_firewall_rules() {
+    docker exec -i cisco-vpn iptables-restore -w 5 --noflush <<EOF
+*filter
+-I INPUT 1 -j RETURN
+-I FORWARD 1 -j RETURN
+-D INPUT -i cscotun0 -p tcp $fw_mark -j DROP
+-A INPUT -i cscotun0 -p tcp -j DROP
+COMMIT
+EOF
+}
+
 # Checks of the SOCKS5 proxy of a container started without SOCKS_PASSWD and NODANTED, while no VPN is
 # connected. The temporary tunnel interface for danted's start is removed before danted's ready line is logged.
 run_socks5_checks() {
@@ -621,9 +674,11 @@ run_checks() {
     check "DNS works in the container" in_c getent hosts deb.debian.org
     check "vpnagentd runs as root" in_c sh -c '[ "$(ps -o user= -C vpnagentd | head -1)" = root ]'
     check "vpnui runs as vpnuser" in_c sh -c '[ "$(ps -o user= -C vpnui | head -1)" = vpnuser ]'
+    check "vpnuser's processes have neither PASSWORD nor SOCKS_PASSWD" gui_has_no_secrets
     check "utmp record points to an ancestor of vpnui" in_c sh -c "$utmp_check"
     # --noproxy '' keeps a NO_PROXY setting on the host from sending the request around the proxy
     check "HTTP proxy works" curl -fsS -o /dev/null --noproxy '' -x http://127.0.0.1:8888 https://deb.debian.org/
+    check "only the loopback address ::1 listens on IPv6" only_loopback_listens_on_ipv6
     check "only NET_ADMIN and SYS_ADMIN are added" sh -c '[ "$(docker inspect -f "{{.HostConfig.CapAdd}}" cisco-vpn)" = "[CAP_NET_ADMIN CAP_SYS_ADMIN]" ]'
     check "vpnui logged its preferences" wait_prefs_logged
     check "preferences allow local LAN access by default" local_lan_access_is true
@@ -652,14 +707,13 @@ check "tunnel interface is kept" in_c sh -c 'ip -o addr show dev cscotun0 | grep
 check "tunnel interface is removed" in_c ip tuntap del mode tun cscotun0
 
 # The firewall checks its rules every 5 seconds, so within 12 seconds it repairs each chain once and then finds
-# its rules first at least once more
+# its rules first at least once more. The rules change in one transaction, so a check of the firewall finds
+# either none or all of the changes.
 echo "--- after a rule is put before the firewall's rules ---"
 inserted_at=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
-check "a rule is inserted at the top of INPUT" in_c iptables -I INPUT 1 -j RETURN
-check "a rule is inserted at the top of FORWARD" in_c iptables -I FORWARD 1 -j RETURN
 # Another owner's rule that is identical to the firewall's DROP rule apart from the mark is not the firewall's
-check "the firewall's DROP rule is replaced by an unmarked copy at the end of INPUT" in_c sh -c \
-    "iptables -D INPUT -i cscotun0 -p tcp $fw_mark -j DROP && iptables -A INPUT -i cscotun0 -p tcp -j DROP"
+check "rules are inserted at the top of INPUT and FORWARD and the DROP rule is replaced by an unmarked copy" \
+    displace_firewall_rules
 sleep 12
 run_firewall_checks
 check "other rules keep their order" unmarked_rules_are $'-A INPUT -j RETURN\n-A INPUT -i cscotun0 -p tcp -j DROP' \
@@ -698,7 +752,7 @@ check "services started after recreate" wait_ready
 run_checks
 run_socks5_checks
 check "default preferences are in the test data directory" test -f "$test_data/$prefs"
-check "no client profile is written without VPN_SERVER" profile_dir_holds "$profile_dir_without_profile"
+check "no client profile is written without VPN_SERVER" profile_is absent
 check "missing VPN_SERVER warning is logged" wait_log '^\[start\] warning: VPN_SERVER is not set'
 check "VNC password file holds the default password" vnc_passwd_holds password
 check "default VNC password warning is logged" wait_log '^\[start\] warning: PASSWORD is not set'
@@ -843,15 +897,14 @@ check "container is recreated with VPN_SERVER=$test_server" recreate CISCO_VPN_D
     SOCKS_USER= SOCKS_PASSWD= NODANTED= PING_ADDR= PING_ADDR_URL= PING_INTERVAL= VPN_SERVER="$test_server"
 check "services started after recreate" wait_ready
 check "client profile lists VPN_SERVER and turns on local LAN access" profile_lists "$test_server"
-check "profile directory holds only the schema and the client profile" profile_dir_holds "$profile_dir_with_profile"
+check "no temporary profile file is left" profile_is present
 check "vpnagentd loaded the client profile" wait_log 'csc_vpnagent\[[0-9]+\]: .*Loaded profiles: .*/cisco-vpn-docker\.xml'
 check "vpnui loaded the client profile" wait_log 'csc_ui\[[0-9]+\]: .*Loaded profiles: .*/cisco-vpn-docker\.xml'
 check "nothing is logged about VPN_SERVER" nothing_logged_about_vpn_server
 check "container restarts" docker restart cisco-vpn
 check "services started after restart" wait_ready
 check "client profile lists VPN_SERVER after restart" profile_lists "$test_server"
-check "profile directory holds only the schema and the client profile after restart" \
-    profile_dir_holds "$profile_dir_with_profile"
+check "no temporary profile file is left after restart" profile_is present
 for server in 192.0.2.1 2001:db8::1 "$label63.example.com"; do
     check "VPN_SERVER=${server:0:24} is accepted" accepts_server "$server"
 done
@@ -873,7 +926,7 @@ check "container is recreated with an invalid VPN_SERVER" recreate CISCO_VPN_DAT
     SOCKS_USER= SOCKS_PASSWD= NODANTED= PING_ADDR= PING_ADDR_URL= PING_INTERVAL= VPN_SERVER='vpn.example.com"/><x'
 check "services started after recreate" wait_ready
 check "refused VPN_SERVER is logged" wait_log '^\[start\] error: VPN_SERVER is not a host name or an IP address'
-check "no client profile is written for an invalid VPN_SERVER" profile_dir_holds "$profile_dir_without_profile"
+check "no client profile is written for an invalid VPN_SERVER" profile_is absent
 
 # A preference file that already exists holds the user's choices and must be kept as a whole: the file that
 # replaces the default one turns LocalLanAccess off and names a gateway, and it is compared byte for byte after
