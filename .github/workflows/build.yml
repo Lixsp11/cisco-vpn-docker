@@ -55,11 +55,12 @@ jobs:
           refused="ghcr.io refuses anonymous pulls of $image; the package is private or does not exist yet"
           unclear="Cannot tell whether $image is public"
 
-          # Anonymous pull token from the registry's token service (the realm in its WWW-Authenticate header);
-          # curl prints the HTTP status code, or 000 when the request fails
+          # Anonymous pull token from the registry's token service (the realm in its WWW-Authenticate header).
+          # curl prints the HTTP status code; a failed transfer stops the build even when a status was received.
           response=$RUNNER_TEMP/ghcr-token.json
           status=$(curl -sS -o "$response" -w '%{http_code}' \
-            "https://ghcr.io/token?scope=repository:$repository:pull&service=ghcr.io" || true)
+            "https://ghcr.io/token?scope=repository:$repository:pull&service=ghcr.io") ||
+            refuse "$unclear: the request to the token service failed (curl exit code $?)"
           case $status in
             401 | 403 | 404)
               echo "$refused (token service: HTTP $status)"
@@ -68,7 +69,8 @@ jobs:
               token=$(jq -r '.token // empty' "$response" 2>/dev/null || true)
               [ -n "$token" ] || refuse "$unclear: the token service answered HTTP 200 without a token"
               status=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
-                "https://ghcr.io/v2/$repository/tags/list" || true)
+                "https://ghcr.io/v2/$repository/tags/list") ||
+                refuse "$unclear: the request for the tag list failed (curl exit code $?)"
               case $status in
                 200) refuse "The package $image is public: anyone can pull it without credentials" ;;
                 401 | 403 | 404) echo "$refused (tag list: HTTP $status)" ;;
