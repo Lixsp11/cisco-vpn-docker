@@ -27,7 +27,9 @@ seed_preferences() {
     # The single-quoted script is expanded by the sh that runs it
     # shellcheck disable=SC2016
     setpriv --reuid="$VPN_USER" --regid="$VPN_USER" --init-groups \
-        sh -c 'mkdir -p "$1" && cp -n /etc/skel-vpnuser/.vpn/.anyconnect "$1/.anyconnect"' sh "/home/$VPN_USER/.vpn"
+        sh -c 'mkdir -p "$1" && cp -n /etc/skel-vpnuser/.vpn/.anyconnect "$1/.anyconnect"' sh "/home/$VPN_USER/.vpn" ||
+        log "warning: cannot create the default preference file /home/$VPN_USER/.vpn/.anyconnect; the Cisco window" \
+            "may show \"Allow local (LAN) access\" turned off"
 }
 
 # Client profile that write_profile writes; the client loads every profile in this directory
@@ -148,10 +150,12 @@ register_login() {
         utmpdump -r >/var/run/utmp 2>/dev/null
 }
 
-# Run the Cisco GUI as the unprivileged user with a login record for it; clear the record when the GUI exits
+# Run the Cisco GUI as the unprivileged user with a login record for it; clear the record when the GUI exits.
+# The GUI and the pages of its login window get neither PASSWORD nor SOCKS_PASSWD: processes of the same user can
+# read each other's environment.
 run_vpnui() {
     setpriv --reuid="$VPN_USER" --regid="$VPN_USER" --init-groups \
-        env HOME="/home/$VPN_USER" USER="$VPN_USER" LOGNAME="$VPN_USER" \
+        env -u PASSWORD -u SOCKS_PASSWD HOME="/home/$VPN_USER" USER="$VPN_USER" LOGNAME="$VPN_USER" \
         dbus-run-session -- "$CSC_BIN/vpnui" &
     local session_pid=$!
     register_login "$session_pid"

@@ -1,3 +1,8 @@
 tmp/
 .git/
 packages/*.rpm
+.env
+.venv/
+.claude/
+.superpowers/
+docs/

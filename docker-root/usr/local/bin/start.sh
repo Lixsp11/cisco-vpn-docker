@@ -46,7 +46,9 @@ trap stop_all TERM INT
 # Docker creates the volume's host directory as root when it does not exist, so give the directory itself
 # to the GUI user, which saves its settings there. Not recursive: files that root keeps there stay root's.
 prepare_home() {
-    chown "$VPN_USER:" "/home/$VPN_USER"
+    chown "$VPN_USER:" "/home/$VPN_USER" ||
+        log "warning: cannot give the data directory /home/$VPN_USER to $VPN_USER; the Cisco client's settings" \
+            "and the VNC password may not be saved"
 }
 
 # VNC password file, in the GUI user's home so that it is kept with the user's other settings
