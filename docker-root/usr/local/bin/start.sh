@@ -47,23 +47,39 @@ prepare_home() {
     chown "$VPN_USER:" "/home/$VPN_USER"
 }
 
+# VNC password file, in the GUI user's home so that it is kept with the user's other settings
+VNC_PASSWD_FILE=/home/$VPN_USER/.vnc/passwd
+
+# Set the VNC password from PASSWORD; VncAuth uses only its first 8 characters.
+# An empty PASSWORD keeps the saved password, and without a saved password the password is "password".
+# The GUI user writes the file, so root writes nothing below the volume; Xtigervnc, running as root, only reads it.
+# The new file replaces the old one only once it is complete, so a failed write keeps the old password.
+# The home directory must already belong to the GUI user (prepare_home).
+prepare_vnc_password() {
+    local vnc_password=$PASSWORD
+    if [ -z "$vnc_password" ]; then
+        [ -s "$VNC_PASSWD_FILE" ] && return
+        vnc_password=password
+        log "warning: PASSWORD is not set and no VNC password is saved; the VNC password is 'password'"
+    fi
+    # The single-quoted script is expanded by the sh that runs it
+    # shellcheck disable=SC2016
+    printf %s "$vnc_password" | setpriv --reuid="$VPN_USER" --regid="$VPN_USER" --init-groups \
+        sh -c 'umask 077 && mkdir -p "$(dirname "$1")" && tigervncpasswd -f >"$1.new" && [ -s "$1.new" ] && mv -f "$1.new" "$1"' \
+        sh "$VNC_PASSWD_FILE" ||
+        log "warning: cannot write the VNC password file $VNC_PASSWD_FILE"
+}
+
 # Remove stale X locks from a previous run
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 
 prepare_home
 vpn_prepare
+prepare_vnc_password
 
 # VNC
-VNC_PASSWORD=${VNC_PASSWORD:-password}
-if [ "$VNC_PASSWORD" = password ]; then
-    log "warning: VNC_PASSWORD is the default value 'password'"
-fi
-mkdir -p "$HOME/.vnc"
-printf %s "$VNC_PASSWORD" | tigervncpasswd -f >"$HOME/.vnc/passwd"
-chmod 600 "$HOME/.vnc/passwd"
-
-run_service vnc Xtigervnc :1 -geometry "${VNC_SIZE:-1280x800}" -depth 24 -rfbport 5901 -localhost=1 \
-    -SecurityTypes VncAuth -PasswordFile "$HOME/.vnc/passwd"
+run_service vnc Xtigervnc :1 -geometry "${VNC_SIZE:-1280x720}" -depth 24 -rfbport 5901 -localhost=1 \
+    -SecurityTypes VncAuth -PasswordFile "$VNC_PASSWD_FILE"
 export DISPLAY=:1
 
 # Wait up to about 10 seconds for X display :1

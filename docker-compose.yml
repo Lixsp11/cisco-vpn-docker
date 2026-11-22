@@ -11,7 +11,10 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
-      VNC_PASSWORD: ${VNC_PASSWORD:-password}
+      # VNC password (only the first 8 characters count; empty keeps the saved one) and window size.
+      # The defaults are in start.sh.
+      PASSWORD: ${PASSWORD:-}
+      VNC_SIZE: ${VNC_SIZE:-}
     ports:
       - "127.0.0.1:6080:6080"   # noVNC
       - "127.0.0.1:1080:1080"   # SOCKS5
