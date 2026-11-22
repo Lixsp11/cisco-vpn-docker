@@ -31,6 +31,17 @@ docker compose up -d
 
 The image is `cisco-vpn-docker:dev` and the container is `cisco-vpn`.
 
+### Building in GitHub Actions
+
+The workflow `.github/workflows/build.yml` builds the image and pushes it to the GitHub container registry (ghcr.io). It runs only when started by hand, from the Actions tab or with `gh workflow run build.yml`. Set the secret and the variable in the repository settings, under Secrets and variables > Actions:
+
+| Name | Kind | Value |
+|---|---|---|
+| `CSC_DEB_URL` | Secret, required | Download URL of your own Cisco package, for example a pre-signed object storage link. The workflow checks that the file is the package `cisco-secure-client-vpn` for `amd64`, and names it after the version in the package. |
+| `IMAGE_NAME` | Variable, optional | Full image name on ghcr.io, such as `ghcr.io/<owner>/<name>`. The default is `ghcr.io/<owner>/<repository>`. The workflow lowercases the name. |
+
+The image is tagged with the package version and `latest`. It is pushed as a private package (see [Why is there no prebuilt image?](#why-is-there-no-prebuilt-image)). A package that a workflow creates gets the visibility of the repository, so the workflow stops with an error in a repository that is not private.
+
 ## Configuration
 
 Set the variables in a `.env` file next to `docker-compose.yml`, or in the environment of `docker compose up`. The compose file passes them to the container, and an empty value means the default. `docker compose up -d` recreates the container when a value changes.
