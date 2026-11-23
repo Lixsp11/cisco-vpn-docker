@@ -2,22 +2,31 @@
 # Firewall rules of the container, in the container's own network namespace:
 #   - the VPN side cannot open TCP connections to the container: new TCP connections that come in through
 #     the tunnel are dropped, after packets of established connections are accepted;
+#   - the services stay reachable from the local network: new TCP connections that come in through the local
+#     network's interface to the service ports are accepted, and so is what leaves from these ports through it;
 #   - route mode: the container forwards packets from the local network to the tunnel and the replies back,
 #     and masquerades what leaves through the tunnel.
-# The VPN client adds chains of its own when it connects and jumps to them from INPUT and FORWARD, and it may
+# The VPN client adds chains of its own when it connects and jumps to them from INPUT, OUTPUT and FORWARD, and it may
 # rebuild them on every connect, so each chain here starts with these rules, before the client's.
 #
 # Usage: firewall.sh apply   put the rules first in their chains; changes nothing when they already are
 #        firewall.sh watch   apply every 5 seconds; logs only when it changes a chain or starts failing
 # Environment:
-#   VPN_TUN  the VPN client's tunnel interface (required; start.sh exports it)
-#   LAN_IF   the interface to the local network (default eth0)
+#   VPN_TUN        the VPN client's tunnel interface (required; start.sh exports it)
+#   SERVICE_PORTS  the TCP ports of the container's services, separated by spaces (required; start.sh exports it)
+#   LAN_IF         the interface to the local network (default eth0)
 
 if [ -z "${VPN_TUN:-}" ]; then
     echo "error: VPN_TUN is not set; it must name the VPN client's tunnel interface" >&2
     exit 1
 fi
+if [ -z "${SERVICE_PORTS:-}" ]; then
+    echo "error: SERVICE_PORTS is not set; it must list the TCP ports of the container's services" >&2
+    exit 1
+fi
 LAN_IF=${LAN_IF:-eth0}
+# The service ports as the multiport match lists them
+SERVICE_PORT_LIST=${SERVICE_PORTS// /,}
 
 # Comment match that marks the rules of this script. Only marked rules are ever deleted or moved. iptables
 # compares the comment when it looks for a rule, so a rule of another owner that is otherwise identical to one
@@ -30,9 +39,19 @@ MARK="-m comment --comment cisco-vpn-docker"
 # match in place of the older state match: accept packets of established connections, then drop new TCP
 # connections from the tunnel. The Cisco client's own chain returns packets from the tunnel interface, which
 # INPUT then accepts.
+# In between, accept new TCP connections from the local network to the service ports. Once connected, the Cisco
+# client's chains, which INPUT and OUTPUT jump to, let through the tunnel, the local network's addresses and the
+# gateway and drop the rest (seen with a real connection), so a client outside the Docker host could not connect to a
+# port that the host publishes on all its addresses. This rule and the OUTPUT rule let such clients through; start.sh's
+# route_replies routes the replies back through the local network, as docker-easyconnect's detect-route.sh does.
 INPUT_RULES=(
     "-m conntrack --ctstate RELATED,ESTABLISHED $MARK -j ACCEPT"
+    "-i $LAN_IF -p tcp -m multiport --dports $SERVICE_PORT_LIST -m conntrack --ctstate NEW $MARK -j ACCEPT"
     "-i $VPN_TUN -p tcp $MARK -j DROP"
+)
+# OUTPUT: accept what the services send from their ports to the local network, the replies to the clients above
+OUTPUT_RULES=(
+    "-o $LAN_IF -p tcp -m multiport --sports $SERVICE_PORT_LIST $MARK -j ACCEPT"
 )
 # FORWARD, for route mode: accept packets from the local network to the tunnel, and the replies.
 # The Cisco client's chains, which FORWARD jumps to, drop forwarded packets whose source is not the tunnel's
@@ -94,6 +113,7 @@ put_first() {
 apply_rules() {
     local status=0
     put_first filter INPUT "${INPUT_RULES[@]}" || status=1
+    put_first filter OUTPUT "${OUTPUT_RULES[@]}" || status=1
     put_first filter FORWARD "${FORWARD_RULES[@]}" || status=1
     put_first nat POSTROUTING "${POSTROUTING_RULES[@]}" || status=1
     return "$status"

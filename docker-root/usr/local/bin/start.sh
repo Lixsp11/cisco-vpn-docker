@@ -1,6 +1,7 @@
 #!/bin/bash
 # Container entrypoint: starts VNC, noVNC, the firewall, the VPN client, the SOCKS5 and HTTP proxies and the
-# keepalive, and keeps them running. Each service's output is prefixed with [service] in docker logs.
+# keepalive, and keeps them running; before the VPN client starts, it routes the services' replies through the
+# container's network. Each service's output is prefixed with [service] in docker logs.
 
 # Unprivileged user, created in the Dockerfile, whose home directory is the volume that keeps the VNC password and,
 # in the Cisco variant, the client's settings. In the Cisco variant it runs the Cisco client's GUI; in the openconnect
@@ -19,8 +20,11 @@ if ! source "/usr/local/bin/vpn-$VPN_TYPE.sh"; then
     log "error: cannot load the steps of the VPN client '$VPN_TYPE' that /etc/vpn-type names"
     exit 1
 fi
-# firewall.sh reads the tunnel interface from the environment
-export VPN_TUN
+# TCP ports of the services that clients connect to: SOCKS5, the HTTP proxy and noVNC. route_replies routes what the
+# services send from them, and firewall.sh opens them on the container's network.
+SERVICE_PORTS="1080 8888 6080"
+# firewall.sh reads the tunnel interface and the service ports from the environment
+export VPN_TUN SERVICE_PORTS
 
 # Run a service in a loop: when it exits, print the exit code and restart it after 1 second.
 # The prefixing sed ignores TERM/INT and ends only after the service closes its output,
@@ -225,6 +229,34 @@ keep_pinging_url() {
     done
 }
 
+# Routing table that route_replies fills with a copy of the main table
+REPLY_TABLE=2
+
+# Route what the services send from SERVICE_PORTS by a copy of the main routing table in REPLY_TABLE, as
+# docker-easyconnect's detect-route.sh (docker-root/usr/local/bin/detect-route.sh) does for the ports of its services.
+# Once a full-tunnel VPN is connected, the main table sends everything through the tunnel, also the replies to a client
+# outside the Docker host that connects to a port that the host publishes on all its addresses. The copy is made before
+# the VPN client starts, so these replies leave through the container's network as before. A table that never held a
+# route does not exist, and ip route flush fails for it, so only an existing table is flushed; ip rule add adds a rule
+# that already exists once more, so each port's rules are deleted first. Running it again thus adds nothing twice.
+# Stops at the first step that fails and returns its status, with ip's errors on stderr.
+route_replies() {
+    local routes route port
+    if ip route show table "$REPLY_TABLE" >/dev/null 2>&1; then
+        ip route flush table "$REPLY_TABLE" || return
+    fi
+    routes=$(ip route show table main) || return
+    while read -r -a route; do
+        if [ "${#route[@]}" -gt 0 ]; then
+            ip route add "${route[@]}" table "$REPLY_TABLE" || return
+        fi
+    done <<<"$routes"
+    for port in $SERVICE_PORTS; do
+        while ip rule del iif lo sport "$port" table "$REPLY_TABLE" 2>/dev/null; do :; done
+        ip rule add iif lo sport "$port" table "$REPLY_TABLE" || return
+    done
+}
+
 # Firewall, before any service starts; the watch then keeps its rules first in their chains.
 # Without the rules the VPN side could open connections to the container's services, so the container stops
 # when they cannot be put in place.
@@ -235,6 +267,13 @@ if [ "${PIPESTATUS[0]}" -ne 0 ]; then
     exit 1
 fi
 run_service firewall firewall.sh watch
+
+# Before the VPN client changes the main table. Without these routes, the services still reply to clients on the
+# container's network, such as the host.
+if ! route_errors=$(route_replies 2>&1); then
+    log "error: cannot route the replies of the ports $SERVICE_PORTS through the container's network" \
+        "(${route_errors//$'\n'/; }); once the VPN is connected, clients outside the Docker host cannot reach them"
+fi
 
 # Remove stale X locks from a previous run
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
