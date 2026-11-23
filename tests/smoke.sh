@@ -14,8 +14,8 @@
 #
 # Waits until the container is ready and runs every check. Stops danted twice, the second time while a tunnel
 # interface of another address exists, and checks the SOCKS5 proxy after run_service restarts it. Puts a rule
-# before the firewall's rules in INPUT and in FORWARD, as the VPN client may do when it connects, and replaces the
-# firewall's DROP rule with an unmarked copy at the end of INPUT, all in one transaction; checks that the firewall
+# before the firewall's rules in INPUT, OUTPUT and FORWARD, as the VPN client may do when it connects, and replaces
+# the firewall's DROP rule with an unmarked copy at the end of INPUT, all in one transaction; checks that the firewall
 # puts its rules back at the top and leaves the other rules in their order, and removes those rules again. Restarts
 # the container, waits again and runs every check once more, then restarts it once more while giving the temporary
 # tunnel interface its address fails. Then recreates the container on an empty data directory of its own under
@@ -608,12 +608,12 @@ socks5_port_is_danteds() {
     in_c sh -c 'pgrep -x -u socks danted >/dev/null && ss -Hltne "sport = :1080" | grep -q " uid:$(id -u socks) "'
 }
 
-# Succeed when the firewall logged, since the time $1, exactly one line that it put its rules first in INPUT and
-# one that it did so in FORWARD, and nothing else: it logs a repair once, and nothing when its rules are first
-firewall_repaired_input_and_forward_once() {
+# Succeed when the firewall logged, since the time $1, exactly one line that it put its rules first in each of INPUT,
+# OUTPUT and FORWARD, and nothing else: it logs a repair once, and nothing when its rules are first
+firewall_repaired_filter_chains_once() {
     local lines expected
     lines=$(docker logs --since "$1" cisco-vpn 2>&1 | grep '^\[firewall\]' | sort)
-    expected=$(printf '[firewall] put the rules first in the %s chain of the filter table\n' FORWARD INPUT)
+    expected=$(printf '[firewall] put the rules first in the %s chain of the filter table\n' FORWARD INPUT OUTPUT)
     [ "$lines" = "$expected" ] && return 0
     echo "firewall lines since $1:"
     printf '%s\n' "$lines"
@@ -630,13 +630,14 @@ unmarked_rules() {
     return 0
 }
 
-# Succeed when the rules of the container's INPUT and FORWARD that do not have the firewall's mark are $1 and $2,
-# one rule per line, in this order
+# Succeed when the rules of the container's INPUT, OUTPUT and FORWARD that do not have the firewall's mark are $1, $2
+# and $3, one rule per line, in this order
 unmarked_rules_are() {
-    local input forward
-    input=$(unmarked_rules INPUT) && forward=$(unmarked_rules FORWARD) || return 1
-    [ "$input" = "$1" ] && [ "$forward" = "$2" ] && return 0
-    printf 'unmarked rules of INPUT:\n%s\nunmarked rules of FORWARD:\n%s\n' "$input" "$forward"
+    local input output forward
+    input=$(unmarked_rules INPUT) && output=$(unmarked_rules OUTPUT) && forward=$(unmarked_rules FORWARD) || return 1
+    [ "$input" = "$1" ] && [ "$output" = "$2" ] && [ "$forward" = "$3" ] && return 0
+    printf 'unmarked rules of INPUT:\n%s\nunmarked rules of OUTPUT:\n%s\nunmarked rules of FORWARD:\n%s\n' \
+        "$input" "$output" "$forward"
     return 1
 }
 
@@ -772,12 +773,13 @@ gui_has_no_secrets() {
         [ -z "$found" ]'
 }
 
-# In one iptables-restore transaction, insert a rule at the top of INPUT and of FORWARD and replace the firewall's
-# DROP rule with an unmarked copy at the end of INPUT
+# In one iptables-restore transaction, insert a rule at the top of INPUT, OUTPUT and FORWARD and replace the
+# firewall's DROP rule with an unmarked copy at the end of INPUT
 displace_firewall_rules() {
     docker exec -i cisco-vpn iptables-restore -w 5 --noflush <<EOF
 *filter
 -I INPUT 1 -j RETURN
+-I OUTPUT 1 -j RETURN
 -I FORWARD 1 -j RETURN
 -D INPUT -i $vpn_tun -p tcp $fw_mark -j DROP
 -A INPUT -i $vpn_tun -p tcp -j DROP
@@ -1089,6 +1091,7 @@ run_checks() {
     check "VNC reads the password file in vpnuser's home" in_c sh -c 'ps -o args= -C Xtigervnc | grep -q -- "-PasswordFile $1"' sh "/home/vpnuser/$vnc_passwd"
     check "VNC password file is a regular file of vpnuser's with mode 600" vnc_passwd_is_private
     run_firewall_checks
+    run_reply_route_checks
 }
 
 # The VPN client of the container's image and its tunnel interface
@@ -1133,18 +1136,19 @@ check "tunnel interface is removed" in_c ip tuntap del mode tun "$vpn_tun"
 echo "--- after a rule is put before the firewall's rules ---"
 inserted_at=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
 # Another owner's rule that is identical to the firewall's DROP rule apart from the mark is not the firewall's
-check "rules are inserted at the top of INPUT and FORWARD and the DROP rule is replaced by an unmarked copy" \
+check "rules are inserted at the top of INPUT, OUTPUT and FORWARD and the DROP rule is replaced by an unmarked copy" \
     displace_firewall_rules
 sleep 12
 run_firewall_checks
 check "other rules keep their order" unmarked_rules_are "-A INPUT -j RETURN"$'\n'"-A INPUT -i $vpn_tun -p tcp -j DROP" \
-    "-A FORWARD -j RETURN"
-check "firewall logged one repair of INPUT and one of FORWARD" firewall_repaired_input_and_forward_once "$inserted_at"
+    "-A OUTPUT -j RETURN" "-A FORWARD -j RETURN"
+check "firewall logged one repair each of INPUT, OUTPUT and FORWARD" firewall_repaired_filter_chains_once "$inserted_at"
 # The single-quoted script is expanded by the sh that runs it
 # shellcheck disable=SC2016
 check "inserted rules are removed" in_c sh -c \
-    'iptables -D INPUT -j RETURN && iptables -D INPUT -i "$1" -p tcp -j DROP && iptables -D FORWARD -j RETURN' sh "$vpn_tun"
-check "only the firewall's rules are left in INPUT and FORWARD" unmarked_rules_are "" ""
+    'iptables -D INPUT -j RETURN && iptables -D INPUT -i "$1" -p tcp -j DROP && iptables -D OUTPUT -j RETURN &&
+        iptables -D FORWARD -j RETURN' sh "$vpn_tun"
+check "only the firewall's rules are left in INPUT, OUTPUT and FORWARD" unmarked_rules_are "" "" ""
 
 echo "--- after docker restart ---"
 check "container restarts" docker restart cisco-vpn
@@ -1194,9 +1198,10 @@ check "VNC accepts the default password" vnc_accepts password
 echo "--- while iptables fails and iptables-restore works ---"
 failing_from=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
 check "failing iptables is installed" install_failing_command iptables
-# The single-quoted script is expanded by the sh that runs it
-# shellcheck disable=SC2016
-check "firewall.sh apply fails" sh -c '! docker exec -e VPN_TUN="$1" cisco-vpn firewall.sh apply' sh "$vpn_tun"
+# The single-quoted script is expanded by the sh that runs it, and lib.sh sets service_ports
+# shellcheck disable=SC2016,SC2154
+check "firewall.sh apply fails" sh -c '! docker exec -e VPN_TUN="$1" -e SERVICE_PORTS="$2" cisco-vpn firewall.sh apply' \
+    sh "$vpn_tun" "${service_ports[*]}"
 sleep 6
 check "failing iptables is removed" in_c rm /usr/local/sbin/iptables
 run_firewall_checks

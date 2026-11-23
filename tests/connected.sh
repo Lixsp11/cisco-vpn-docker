@@ -4,7 +4,8 @@
 #
 # Checks that the Cisco client is connected through a tunnel interface of its own, not the temporary one that
 # start.sh creates for danted; that the client's ciscovpn* chains exist and the firewall's rules are still the
-# first rules of INPUT, FORWARD and nat POSTROUTING and stay first without repairs; that forwarding is still on;
+# first rules of INPUT, OUTPUT, FORWARD and nat POSTROUTING and stay first without repairs; that forwarding is still
+# on; that routing table 2 and the policy rules that route the service ports' replies by it are still in place;
 # that vpnui reads LocalLanAccess: true and the gateway grants local LAN access; that noVNC is still reachable;
 # and that the SOCKS5 and HTTP proxies leave through the VPN: an IP echo service sees the same IPv4 address
 # through both, and another one for a direct request from the host.
@@ -321,6 +322,7 @@ main() {
     check "FORWARD jumps to a Cisco client chain" jumps_to_cisco_chain FORWARD
     run_firewall_checks
     check "firewall logs no repair or failure in 12 seconds" firewall_stays_quiet
+    run_reply_route_checks
 
     echo "--- local LAN access ---"
     check "vpnui reads LocalLanAccess: true" local_lan_access_is true
