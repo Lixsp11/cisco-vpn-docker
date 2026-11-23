@@ -1,4 +1,4 @@
-# Example deployment. doc/usage.md describes the variables, ports, route mode and data directory.
+# Example deployment. docs/usage.md describes the variables, ports, route mode and data directory.
 services:
   cisco-vpn:
     build: .
@@ -24,7 +24,7 @@ services:
       # connected. Without it, a warning is logged and that access is off until turned on in the Cisco window.
       VPN_SERVER: ${VPN_SERVER:-}
       # openconnect variant: extra arguments of openconnect, split as bash splits a command line (quotes keep
-      # spaces); -i and --interface are refused, reliably only when long options take their value with = (doc/usage.md)
+      # spaces); -i and --interface are refused, reliably only when long options take their value with = (docs/usage.md)
       CLI_OPTS: ${CLI_OPTS:-}
       # VNC password (only the first 8 characters of its first line count; empty keeps the saved one, and
       # without a saved one the password is "password") and window size (default 1280x720)

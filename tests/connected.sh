@@ -9,7 +9,7 @@
 # and that the SOCKS5 and HTTP proxies leave through the VPN: an IP echo service sees the same IPv4 address
 # through both, and another one for a direct request from the host.
 # Route mode: adds a host route for one IPv4 address of the echo service through the container, with the tunnel's
-# MTU, as doc/usage.md describes, checks that a request to that address arrives with the proxies' address, and
+# MTU, as docs/usage.md describes, checks that a request to that address arrives with the proxies' address, and
 # deletes the route. The route is added only when the VPN is connected, the proxies leave through it, the host's
 # state was recorded and the host has no route to that address yet. The script deletes only a route that its own
 # add created, also from a trap when it ends early, after a signal or a write to a closed output. The route is the

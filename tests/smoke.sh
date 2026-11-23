@@ -1,6 +1,6 @@
 #!/bin/bash
 # Smoke tests that need no VPN login. Run as root on the Docker host after `docker compose up -d --build`.
-# Preconditions and side effects (also in doc/usage.md, Tests):
+# Preconditions and side effects (also in docs/usage.md, Tests):
 #   - It restarts and recreates the configured container cisco-vpn, which ends any VPN session, and finally
 #     recreates it with the configured settings. After an interrupted run, `docker compose up -d --force-recreate`
 #     brings back the configured container.

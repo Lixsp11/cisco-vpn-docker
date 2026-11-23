@@ -15,7 +15,7 @@ The build chooses the VPN client from the `.deb` files in `packages/` and writes
 | `CLI_OPTS` | Not used | Extra arguments of openconnect |
 | Tunnel interface | `cscotun0` | `tun0` |
 
-[doc/usage.md](doc/usage.md#build) has the rules for `packages/`.
+[docs/usage.md](docs/usage.md#build) has the rules for `packages/`.
 
 ## How it works
 
@@ -36,7 +36,7 @@ The entrypoint `start.sh` loads the steps of the client that `/etc/vpn-type` nam
 
 In the openconnect variant, openconnect runs with `--external-browser` set to a script that prints the login URL in the terminal and in `docker logs`; the image has no browser. After the login, your browser opens `http://localhost:29786/...`. openconnect listens for that request only on the container's IPv6 loopback address, so the container publishes port 29786 and forwards it there with an iptables redirect and socat, as docker-easyconnect does for the ports where its clients wait for the browser.
 
-The container runs with the `NET_ADMIN` and `SYS_ADMIN` capabilities and `/dev/net/tun`, without `--privileged` or the host network. [doc/usage.md](doc/usage.md#faq) explains each step that the Cisco client needs inside a container.
+The container runs with the `NET_ADMIN` and `SYS_ADMIN` capabilities and `/dev/net/tun`, without `--privileged` or the host network. [docs/usage.md](docs/usage.md#faq) explains each step that the Cisco client needs inside a container.
 
 ## Requirements
 
@@ -55,7 +55,7 @@ The container runs with the `NET_ADMIN` and `SYS_ADMIN` capabilities and `/dev/n
    VPN_SERVER=vpn.example.com
    ```
 
-   In the Cisco variant, `VPN_SERVER` turns on Cisco's "Allow local (LAN) access" for that gateway, so that the host can still reach noVNC and the proxies once the VPN is connected (see the [FAQ](doc/usage.md#how-is-allow-local-lan-access-turned-on-and-what-if-the-gateway-does-not-allow-it)). In the openconnect variant, `VPN_SERVER` is required, and `CLI_OPTS` can add arguments of openconnect (see [openconnect arguments](doc/usage.md#openconnect-arguments-cli_opts)).
+   In the Cisco variant, `VPN_SERVER` turns on Cisco's "Allow local (LAN) access" for that gateway, so that the host can still reach noVNC and the proxies once the VPN is connected (see the [FAQ](docs/usage.md#how-is-allow-local-lan-access-turned-on-and-what-if-the-gateway-does-not-allow-it)). In the openconnect variant, `VPN_SERVER` is required, and `CLI_OPTS` can add arguments of openconnect (see [openconnect arguments](docs/usage.md#openconnect-arguments-cli_opts)).
 
 3. Build and start. `[start] all services started` in the log means that startup has finished; the lines of each service show whether it runs or failed:
 
@@ -92,4 +92,4 @@ The container runs with the `NET_ADMIN` and `SYS_ADMIN` capabilities and `/dev/n
 
 ## Documentation
 
-[doc/usage.md](doc/usage.md) covers the build, the environment variables, ports, logging in, proxies, route mode, keepalive, persistence, firewall and diagnostics, and has an FAQ.
+[docs/usage.md](docs/usage.md) covers the build, the environment variables, ports, logging in, proxies, route mode, keepalive, persistence, firewall and diagnostics, and has an FAQ.
