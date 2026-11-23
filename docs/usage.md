@@ -71,7 +71,7 @@ The workflow `.github/workflows/build.yml` does the same steps with the same Doc
 | `ALIYUN_ACR_USERNAME` | Username for `docker login` to that registry |
 | `ALIYUN_ACR_PASSWORD` | Password or access token for that username |
 
-Any registry that accepts `docker login` with a username and password works; the names of the two login secrets are only names. The image is tagged with the package version and `latest`. The repository in the registry must be private (see [Why is there no prebuilt image?](#why-is-there-no-prebuilt-image)). GitHub masks the values of the secrets in the job log, and the workflow also masks the registry host that it takes from `IMAGE_NAME`.
+Any registry that accepts `docker login` with a username and password works; the names of the two login secrets are only names. The image is tagged with the package version and `latest`. The repository in the registry must be private (see [Why is there no prebuilt image?](#why-is-there-no-prebuilt-image)). GitHub masks the values of the secrets in the job log, and the workflow also masks the registry host that it takes from `IMAGE_NAME`. The workflow turns off the build summary and the build record artifact of `docker/build-push-action`, since both contain the image name and the artifact is not masked.
 
 ### Deploying a prebuilt image
 

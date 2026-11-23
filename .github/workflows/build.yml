@@ -85,6 +85,10 @@ jobs:
           password: ${{ secrets.ALIYUN_ACR_PASSWORD }}
 
       - uses: docker/build-push-action@v7
+        env:
+          # The build record artifact holds the image name unmasked; the job summary, which lists it too, is off as well
+          DOCKER_BUILD_RECORD_UPLOAD: false
+          DOCKER_BUILD_SUMMARY: false
         with:
           # The checked-out directory, which holds the downloaded package; the action's default Git context does not
           context: .
