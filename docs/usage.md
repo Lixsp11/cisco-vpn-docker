@@ -119,11 +119,13 @@ openconnect --protocol=anyconnect --external-browser=/usr/local/bin/print-login-
 | 20000 | socat, forward of 29786 | Not published |
 | 5901 | VNC | Inside the container only |
 
-The proxies accept any client that reaches them, so keep the ports on `127.0.0.1` and forward them over SSH:
+The compose file publishes the ports on `127.0.0.1`. From another machine, forward them over SSH:
 
 ```bash
 ssh -N -L 6080:127.0.0.1:6080 -L 1080:127.0.0.1:1080 -L 8888:127.0.0.1:8888 -L 29786:127.0.0.1:29786 user@host
 ```
+
+Ports 6080, 1080 and 8888 can also be published on all of the host's addresses, such as `"1080:1080"`, and stay reachable from other machines while the VPN is connected (see [Firewall](#firewall)). The proxies accept any client that reaches them: set `SOCKS_USER` and `SOCKS_PASSWD`, and keep 8888 on `127.0.0.1` unless a firewall limits who reaches it, since the HTTP proxy has no authentication.
 
 ## Logging in
 
@@ -189,11 +191,13 @@ IPv4 iptables rules in the container, each with the comment `cisco-vpn-docker`:
 
 | Chain | Rules | Purpose |
 |---|---|---|
-| filter `INPUT` | accept established and related, drop new TCP from the tunnel | VPN-side machines cannot connect to the container |
+| filter `INPUT` | accept established and related, accept new TCP from `eth0` to 6080, 1080 and 8888, drop new TCP from the tunnel | Clients outside the Docker host reach the services; VPN-side machines cannot connect to the container |
+| filter `OUTPUT` | accept TCP from 6080, 1080 and 8888 out of `eth0` | Replies to those clients |
 | filter `FORWARD` | accept `eth0` to tunnel and the replies | Route mode |
 | nat `POSTROUTING` | masquerade out of the tunnel | Route mode |
 
 - The Cisco client adds its own chains when it connects. Every 5 seconds the container puts its rules first again and logs each repair.
+- Replies from 6080, 1080 and 8888 leave through `eth0`, not the tunnel: before the VPN client starts, the container copies its main routing table to table 2 and adds `ip rule add iif lo sport <port> table 2` for each port, as docker-easyconnect's `detect-route.sh` does. If that fails, the log shows `[start] error: cannot route the replies ...`, and once the VPN is connected only clients on the Docker network, such as the host, reach the ports.
 - Without `NET_ADMIN` the rules cannot be set, and the container stops before any service starts.
 - The openconnect variant also redirects port 29786 to socat on port 20000 (see [FAQ](#where-does-port-29786-come-from)).
 - There are no IPv6 rules; the services listen only on IPv4 and `::1`.
