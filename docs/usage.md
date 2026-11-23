@@ -155,7 +155,7 @@ curl -x socks5h://<SOCKS_USER>:<SOCKS_PASSWD>@127.0.0.1:1080 https://intranet.ex
 
 - Traffic goes through the tunnel for the addresses that the VPN routes, and directly otherwise.
 - Names are resolved in the container with the VPN's DNS, so use `--socks5-hostname` or `socks5h://`.
-- `SOCKS_USER` must be a plain user name (lowercase letters, digits, `_`, `-`, at most 32 characters) and not an existing account such as `root`; otherwise the SOCKS5 proxy does not start and the log says why.
+- `SOCKS_USER` can be any name that `useradd` accepts, uppercase letters included, as in docker-easyconnect, but not an existing account such as `root`; otherwise the SOCKS5 proxy does not start and the log says why.
 
 ## Route mode
 

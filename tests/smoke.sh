@@ -22,10 +22,10 @@
 # the repository's tmp/ and runs every check there. On that directory it makes iptables fail while
 # iptables-restore works and checks that the firewall changes nothing. It restarts the container while iptables
 # and iptables-restore fail and checks that it stops before it starts the VPN client. It recreates the container
-# with SOCKS_USER and SOCKS_PASSWD set and restarts it, recreates it with only SOCKS_USER set, with a SOCKS_PASSWD
-# that cannot be set (and restarts it with an account of the proxy's left from an earlier start), with
-# SOCKS_USER naming each of the image's accounts and a malformed SOCKS_USER, and with NODANTED set. It recreates
-# it with PING_ADDR set to an address that does not answer, with PING_ADDR and PING_ADDR_URL set to the
+# with an uppercase SOCKS_USER and SOCKS_PASSWD set and restarts it, recreates it with only SOCKS_USER set, with a
+# SOCKS_PASSWD that cannot be set (and restarts it with an account of the proxy's left from an earlier start), with
+# SOCKS_USER naming each of the image's accounts and a SOCKS_USER that useradd refuses, and with NODANTED set.
+# It recreates it with PING_ADDR set to an address that does not answer, with PING_ADDR and PING_ADDR_URL set to the
 # container's own address and a web server that the checks start in it (and restarts it, then stops it while a
 # keepalive request waits for a server that never answers), with PING_INTERVAL empty and with a PING_INTERVAL of
 # 0. It recreates it with VPN_SERVER set, checks the client profile and restarts it, runs vpn_prepare again in it
@@ -1221,20 +1221,21 @@ else
     check "login terminal is not started" openconnect_logged_nothing
 fi
 
+# SOCKS_USER has uppercase letters, which useradd accepts, as in docker-easyconnect
 echo "--- with SOCKS_USER and SOCKS_PASSWD set ---"
 check "container is recreated with SOCKS_USER and SOCKS_PASSWD" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
-    SOCKS_USER=u SOCKS_PASSWD=p NODANTED=
+    SOCKS_USER=TxIeO5 SOCKS_PASSWD=p NODANTED=
 check "services started after recreate" wait_ready
 check "danted listens on port 1080" wait_danted
 check "SOCKS5 proxy refuses a client without a username" socks5_refuses socks5h://127.0.0.1:1080
-check "SOCKS5 proxy refuses a wrong password" socks5_refuses socks5h://u:wrong@127.0.0.1:1080
-check "SOCKS5 proxy accepts SOCKS_USER and SOCKS_PASSWD" socks5_works socks5h://u:p@127.0.0.1:1080
+check "SOCKS5 proxy refuses a wrong password" socks5_refuses socks5h://TxIeO5:wrong@127.0.0.1:1080
+check "SOCKS5 proxy accepts SOCKS_USER and SOCKS_PASSWD" socks5_works socks5h://TxIeO5:p@127.0.0.1:1080
 # The restart finds the account that the first start created for SOCKS_USER and sets its password again
 check "container restarts" docker restart cisco-vpn
 check "services started after restart" wait_ready
 check "danted listens on port 1080 after restart" wait_danted
 check "SOCKS5 proxy refuses a client without a username after restart" socks5_refuses socks5h://127.0.0.1:1080
-check "SOCKS5 proxy accepts SOCKS_USER and SOCKS_PASSWD after restart" socks5_works socks5h://u:p@127.0.0.1:1080
+check "SOCKS5 proxy accepts SOCKS_USER and SOCKS_PASSWD after restart" socks5_works socks5h://TxIeO5:p@127.0.0.1:1080
 
 # Without SOCKS_PASSWD the proxy needs no username, as in docker-easyconnect
 echo "--- with only SOCKS_USER set ---"
@@ -1273,11 +1274,13 @@ for account in root vpnuser socks; do
     check "$account has no password" account_has_no_password "$account"
 done
 
-echo "--- with a malformed SOCKS_USER ---"
+# Debian's useradd refuses a name with ":", the field separator of /etc/passwd
+echo "--- with a SOCKS_USER that useradd refuses ---"
 check "container is recreated with SOCKS_USER=bad:name" recreate CISCO_VPN_DATA="$test_data" PASSWORD= VNC_SIZE= \
     SOCKS_USER=bad:name SOCKS_PASSWD=p NODANTED=
 check "services started after recreate" wait_ready
-check "refused SOCKS_USER is logged" wait_log '^\[start\] error: SOCKS_USER is not a valid user name'
+check "refused SOCKS_USER is logged" \
+    wait_log '^\[start\] error: cannot create the account bad:name; the SOCKS5 proxy is not started$'
 check "danted is not started" danted_is_off
 check "no account is created" in_c sh -c '! grep "^bad" /etc/passwd'
 

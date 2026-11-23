@@ -120,18 +120,15 @@ start_danted() {
 }
 
 # Give SOCKS_USER an account with the password SOCKS_PASSWD: create a system account with SOCKS_ACCOUNT_COMMENT,
-# or reuse one that an earlier start created. Fails, and logs why, when SOCKS_USER is not a plain user name
-# (lowercase letters, digits, _ and -, not starting with a digit or -, at most 32 characters), names an
-# existing account without that comment, such as root or vpnuser, or SOCKS_PASSWD contains a newline,
-# or when creating the account or setting its password fails.
+# or reuse one that an earlier start created. useradd decides which names are valid, as in docker-easyconnect's
+# start.sh: Debian's useradd accepts uppercase letters and refuses, for example, a name with ":" or whitespace,
+# and prints its reason in the log. The name comes after --, so useradd never reads it as an option.
+# Fails, and logs why, when SOCKS_USER names an existing account without that comment, such as root or vpnuser,
+# or SOCKS_PASSWD contains a newline, or when creating the account or setting its password fails.
 # chpasswd reads "user:password" lines on stdin, so the password is neither on a command line nor in the logs;
 # a newline would start another line, which sets the password of another account.
 set_socks_user() {
     local account
-    if ! [[ $SOCKS_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
-        log "error: SOCKS_USER is not a valid user name; the SOCKS5 proxy is not started"
-        return 1
-    fi
     if [[ $SOCKS_PASSWD == *$'\n'* ]]; then
         log "error: SOCKS_PASSWD contains a newline; the SOCKS5 proxy is not started"
         return 1
@@ -142,7 +139,7 @@ set_socks_user() {
                 "the SOCKS5 proxy is not started"
             return 1
         fi
-    elif ! useradd -r -M -s /usr/sbin/nologin -c "$SOCKS_ACCOUNT_COMMENT" "$SOCKS_USER"; then
+    elif ! useradd -r -M -s /usr/sbin/nologin -c "$SOCKS_ACCOUNT_COMMENT" -- "$SOCKS_USER"; then
         log "error: cannot create the account $SOCKS_USER; the SOCKS5 proxy is not started"
         return 1
     fi
