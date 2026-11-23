@@ -62,7 +62,7 @@ docker push <image>:latest
 
 ### Building in GitHub Actions
 
-The workflow `.github/workflows/build.yml` does the same steps with the package from `CSC_DEB_URL`: it downloads the package, builds the Cisco variant with its file name as `CSC_DEB`, logs in to the registry and pushes the image. It runs only when started by hand, from the Actions tab or with `gh workflow run build.yml`. The workflow reads the registry, the image name and the login only from these secrets; set all four in the repository settings, under Secrets and variables > Actions:
+The workflow `.github/workflows/build.yml` does the same steps with the same Dockerfile and the package from `CSC_DEB_URL`: it downloads the package, builds the Cisco variant with its file name as `CSC_DEB`, logs in to the registry and pushes the image. It runs only when started by hand, from the Actions tab or with `gh workflow run build.yml`. The workflow reads the registry, the image name and the login only from these secrets; set all four in the repository settings, under Secrets and variables > Actions:
 
 | Secret | Value |
 |---|---|
