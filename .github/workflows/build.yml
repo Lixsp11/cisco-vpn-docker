@@ -1,15 +1,16 @@
 name: Build
 
-# Builds the image from the Cisco package at the secret CSC_DEB_URL and pushes it to ghcr.io.
-# The package on ghcr.io must stay private: the image contains the Cisco Secure Client, and Cisco's
-# software terms do not allow providing it to third parties. Check its visibility in the package settings.
+# Builds the image of the Cisco variant from the package at the secret CSC_DEB_URL and pushes it under the image name
+# in the secret IMAGE_NAME, logging in to its registry with the secrets ALIYUN_ACR_USERNAME and ALIYUN_ACR_PASSWORD.
+# The registry, repository and login come only from these secrets; docs/usage.md describes them.
+# The registry repository must be private: the image contains the Cisco Secure Client, and Cisco's software terms
+# do not allow providing it to third parties.
 
 # Runs only when started by hand (Actions tab, gh workflow run or the REST API)
 on: workflow_dispatch
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build:
@@ -18,14 +19,20 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Image name
-        id: image
+      - name: Registry host
+        id: registry
         env:
-          # Full image name; without the variable IMAGE_NAME, ghcr.io/<owner>/<repository>
-          IMAGE_NAME: ${{ vars.IMAGE_NAME || format('ghcr.io/{0}', github.repository) }}
+          # Full image name including the registry host, in lowercase, such as registry.example.com/namespace/name
+          IMAGE_NAME: ${{ secrets.IMAGE_NAME }}
         run: |
-          # Image names must be lowercase, and GitHub owner and repository names can contain uppercase letters
-          echo "name=${IMAGE_NAME,,}" >>"$GITHUB_OUTPUT"
+          if [ -z "$IMAGE_NAME" ]; then
+            echo "::error::The secret IMAGE_NAME is not set"
+            exit 1
+          fi
+          registry=${IMAGE_NAME%%/*}
+          # GitHub masks a secret's value in the log, but not a part of it such as this host, which the login step prints
+          echo "::add-mask::$registry"
+          echo "host=$registry" >>"$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v7
 
@@ -73,9 +80,9 @@ jobs:
 
       - uses: docker/login-action@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: ${{ steps.registry.outputs.host }}
+          username: ${{ secrets.ALIYUN_ACR_USERNAME }}
+          password: ${{ secrets.ALIYUN_ACR_PASSWORD }}
 
       - uses: docker/build-push-action@v7
         with:
@@ -84,5 +91,5 @@ jobs:
           build-args: CSC_DEB=${{ steps.package.outputs.file }}
           push: true
           tags: |
-            ${{ steps.image.outputs.name }}:${{ steps.package.outputs.version }}
-            ${{ steps.image.outputs.name }}:latest
+            ${{ secrets.IMAGE_NAME }}:${{ steps.package.outputs.version }}
+            ${{ secrets.IMAGE_NAME }}:latest

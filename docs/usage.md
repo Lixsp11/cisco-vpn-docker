@@ -43,16 +43,48 @@ docker compose up -d
 
 Both variants build the image `cisco-vpn-docker:dev` and run as the container `cisco-vpn`. To change the variant, add or remove the package and build again.
 
+### Building and pushing by hand
+
+To run the Cisco variant on hosts without the Cisco package, push the image to a repository in a container registry and pull it from there (see [Deploying a prebuilt image](#deploying-a-prebuilt-image)). The repository must be private: the image contains the Cisco Secure Client (see [Why is there no prebuilt image?](#why-is-there-no-prebuilt-image)). In the commands below, `<image>` is the full image name including the registry host, for example `registry.example.com/<namespace>/cisco-vpn-docker`, `<registry>` is that host, and `<version>` is the version of the Cisco package. Image names must be lowercase.
+
+With the package in `packages/`, build the image as above, log in to the registry, and tag and push the image:
+
+```bash
+docker compose build
+docker login <registry>
+docker tag cisco-vpn-docker:dev <image>:<version>
+docker tag cisco-vpn-docker:dev <image>:latest
+docker push <image>:<version>
+docker push <image>:latest
+```
+
+`docker build -t cisco-vpn-docker:dev .` builds the same image as `docker compose build`.
+
 ### Building in GitHub Actions
 
-The workflow `.github/workflows/build.yml` builds the image and pushes it to the GitHub container registry (ghcr.io). It builds only the Cisco variant: it downloads the package from `CSC_DEB_URL` and passes its file name as `CSC_DEB`. It runs only when started by hand, from the Actions tab or with `gh workflow run build.yml`. Set the secret and the variable in the repository settings, under Secrets and variables > Actions:
+The workflow `.github/workflows/build.yml` does the same steps with the package from `CSC_DEB_URL`: it downloads the package, builds the Cisco variant with its file name as `CSC_DEB`, logs in to the registry and pushes the image. It runs only when started by hand, from the Actions tab or with `gh workflow run build.yml`. The workflow reads the registry, the image name and the login only from these secrets; set all four in the repository settings, under Secrets and variables > Actions:
 
-| Name | Kind | Value |
-|---|---|---|
-| `CSC_DEB_URL` | Secret, required | Download URL of your own Cisco package, for example a pre-signed object storage link. The workflow checks that the file is the package `cisco-secure-client-vpn` for `amd64`, and names it after the version in the package. |
-| `IMAGE_NAME` | Variable, optional | Full image name on ghcr.io, for example `ghcr.io/<owner>/<name>`. The default is `ghcr.io/<owner>/<repository>`. The workflow lowercases the name. |
+| Secret | Value |
+|---|---|
+| `CSC_DEB_URL` | Download URL of your own Cisco package, for example a pre-signed object storage link. The workflow checks that the file is the package `cisco-secure-client-vpn` for `amd64`, and names it after the version in the package. |
+| `IMAGE_NAME` | Full image name including the registry host, for example `registry.example.com/<namespace>/cisco-vpn-docker`. It must be lowercase. The workflow logs in to the part before the first `/`. |
+| `ALIYUN_ACR_USERNAME` | Username for `docker login` to that registry |
+| `ALIYUN_ACR_PASSWORD` | Password or access token for that username |
 
-The image is tagged with the package version and `latest`. The package on ghcr.io must be private (see [Why is there no prebuilt image?](#why-is-there-no-prebuilt-image)).
+Any registry that accepts `docker login` with a username and password works; the names of the two login secrets are only names. The image is tagged with the package version and `latest`. The repository in the registry must be private (see [Why is there no prebuilt image?](#why-is-there-no-prebuilt-image)). GitHub masks the values of the secrets in the job log, and the workflow also masks the registry host that it takes from `IMAGE_NAME`.
+
+### Deploying a prebuilt image
+
+On a host with this repository but without the Cisco package, log in to the registry, pull the image, give it the image name of `docker-compose.yml`, `cisco-vpn-docker:dev`, and start it. `<tag>` is a package version or `latest`:
+
+```bash
+docker login <registry>
+docker pull <image>:<tag>
+docker tag <image>:<tag> cisco-vpn-docker:dev
+docker compose up -d
+```
+
+Compose pulls or builds the image only when no image of that name is present, so `docker compose up -d` starts the pulled image: the host needs no Cisco package, and `docker-compose.yml` needs no change. `docker compose up --build` and `docker compose build` build from `packages/` instead and give the result the same name, which is the openconnect variant when `packages/` holds no `.deb` file. Tag the pulled image again to go back to it.
 
 ## Configuration
 
@@ -411,4 +443,4 @@ A published port reaches the container's own network address, not its loopback a
 
 ### Why is there no prebuilt image?
 
-The image of the Cisco variant contains the Cisco Secure Client, and [Cisco's software terms](https://www.cisco.com/c/en/us/about/legal/cloud-and-software/software-terms.html) do not allow providing the software to third parties. Build the image yourself from your own copy of the package.
+This project publishes no image of the Cisco variant: the image contains the Cisco Secure Client, and [Cisco's software terms](https://www.cisco.com/c/en/us/about/legal/cloud-and-software/software-terms.html) do not allow providing the software to third parties. Build the image yourself from your own copy of the package. To run it on other hosts, push it to a private repository in a container registry, by hand or with the workflow, and pull it from there (see [Building and pushing by hand](#building-and-pushing-by-hand), [Building in GitHub Actions](#building-in-github-actions) and [Deploying a prebuilt image](#deploying-a-prebuilt-image)).
